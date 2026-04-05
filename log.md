@@ -5,7 +5,7 @@
 **Šta sam tražila:** Početna struktura projekta sa sigurnosnim kontrolama
 
 **Šta je Claude generisao:**
-- app/__init__.py (Application Factory sa svim ekstenzijama)
+- app/__init__.py (Application Factory sa svim ekstenzijama, napomena: content_type_option uzrokovalo bug, ručno prepravila u x_content_type_options zbog verzije Talisman) 
 - app/models.py (User, Role, Grade, AttendanceRecord, AuditLog)
 - app/config.py (Development/Testing/Production konfiguracija)
 - app/routes/auth.py (login, logout, refresh, /me)
