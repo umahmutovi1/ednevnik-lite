@@ -1,0 +1,42 @@
+# =============================================================================
+# Dnevnik-Lite — requirements.txt
+# All versions pinned for reproducibility and supply-chain security.
+# Run: pip install -r requirements.txt
+# =============================================================================
+
+# --- Core Framework ---
+Flask==3.0.3                  # Web framework — thin, explicit, well-audited
+
+# --- ORM & Database ---
+Flask-SQLAlchemy==3.1.1       # ORM — all queries parameterized; SQL Injection structurally impossible
+Flask-Migrate==4.0.7          # Alembic wrapper — schema version control; audit trail for DB changes
+psycopg2-binary==2.9.9        # PostgreSQL async driver; binary for easy install
+
+# --- Authentication & Token Security ---
+Flask-JWT-Extended==4.6.0     # Stateless JWT auth — short-lived access tokens + refresh rotation
+flask-bcrypt==1.0.1           # Adaptive bcrypt hashing — work factor 12; GPU/rainbow-table resistant
+itsdangerous==2.2.0           # HMAC-signed tokens for password reset flows (time-limited)
+
+# --- Rate Limiting (Brute-force & Credential Stuffing Defense) ---
+Flask-Limiter==3.7.0          # Per-IP and per-user rate limiting on auth endpoints
+redis==5.0.4                  # Flask-Limiter production backend — distributed, persistent counters
+                              # TODO: Production — ensure Redis is configured; dev falls back to in-memory
+
+# --- Security Headers & HTTPS Enforcement ---
+Flask-Talisman==1.1.0         # HTTPS redirect + HSTS + CSP + X-Frame-Options + X-Content-Type headers
+
+# --- Input Validation (Phase 2 full implementation) ---
+marshmallow==3.21.3           # Schema-based deserialization and validation
+                              # NOTE: Full schema validation on all routes is a Phase 2 task
+                              # Included now so the dependency graph is stable from day one
+
+# --- Environment & Config ---
+python-dotenv==1.0.1          # Loads secrets from .env — never hardcode credentials
+
+# --- CORS (API clients / future SPA support) ---
+Flask-Cors==4.0.1             # Cross-Origin Resource Sharing — locked down to specific origins in prod
+
+# --- Testing (Phase 2) ---
+pytest==8.2.2                 # Test runner
+pytest-flask==1.3.0           # Flask test client helpers
+factory-boy==3.3.0            # Model factories for seeding test fixtures (vulnerable vs hardened states)
