@@ -136,7 +136,7 @@ def create_app(config_name: Optional[str] = None) -> Flask:
         # X-Frame-Options: DENY — prevents clickjacking
         frame_options="DENY",
         # X-Content-Type-Options: nosniff — prevents MIME sniffing attacks
-        content_type_options=True,
+        x_content_type_options=True,
         # CSP: permissive default — TODO Phase 2: tighten to specific sources
         # A proper CSP is left for Phase 2 because it requires knowing all
         # frontend origins, nonces for inline scripts, etc.
