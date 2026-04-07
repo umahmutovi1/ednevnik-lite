@@ -92,9 +92,9 @@
 | A09:2025 - Security Logging and Alerting Failures | ✅ | AuditLog (success + failure eventi), admin viewer | Nema alertinga (može se dodati u Fazi 2) |
 | A10:2025 - Mishandling of Exceptional Conditions | ⚠️ | Siguran error handling (bez stack trace), rate limiting | Može se poboljšati centralizovanim monitoring-om |
 
-## Sesija 1 — Datum: 7. april 2026.
+## Sesija 2 — Datum: 7. april 2026.
 
-### Prompt #1: Poboljšanje aplikacije sa sigurnosnim kontrolama (Faza 2)
+### Prompt #2: Poboljšanje aplikacije sa sigurnosnim kontrolama (Faza 2)
 
 **Šta sam tražila:** Input Validation via marshmallow (Schema), Security Headers & Configuration Hardening, Dependency Audit & Supply Chain Security, Refresh Token Rotation + Redis Blocklist
 
