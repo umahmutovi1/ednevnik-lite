@@ -44,3 +44,57 @@
 - A03 Injection: ✅ SQLAlchemy ORM
 - A07 Auth Failures: ⚠️ Djelimično (nedostaje refresh rotacija)
 - A09 Logging: ✅ AuditLog
+***Napomene:***
+- Claude ja automatski koristio OWASP Top 10 listu iz 2021, te je tek nakon eksplicitnog promptovanja da se koristi lista iz 2025. moguće pokriće najnovijih stavki. U sljedećim tabelama referencirana je OWASP Top 10 2025 lista.
+- Neke sigurnosne stavke su pokrivene kroz requirements.txt i README.md fajlove, što je ostavljeno na developeru da ispoštuje.
+- ***requirements.txt: Ovdje se pokrivaju tehničke kontrole (libraries / dependencies):***
+
+| Sigurnosna oblast | Dependency | Opis implementacije | OWASP kategorije | Status |
+|------------------|-----------|---------------------|------------------|--------|
+| Autentikacija i sesije | Flask-JWT-Extended | JWT access + refresh tokeni | A07: Authentication Failures | ✅ |
+| Hashiranje lozinki | flask-bcrypt | bcrypt (work factor 12) | A04: Cryptographic Failures | ✅ |
+| Token sigurnost | itsdangerous | HMAC signed tokeni | A07: Authentication Failures | ✅ |
+| Brute-force zaštita | Flask-Limiter | Rate limiting po IP | A07: Authentication Failures | ✅ |
+| Distribuirani rate limit | redis | Persistent counters | A07: Authentication Failures | ✅ |
+| HTTPS + sigurnosni headeri | Flask-Talisman | HSTS, CSP, X-Frame-Options | A04: Cryptographic Failures, A02: Security Misconfiguration | ✅ |
+| ORM zaštita | Flask-SQLAlchemy | Bez raw SQL (nema injectiona) | A05: Injection | ✅ |
+| Migracije | Flask-Migrate | Kontrolisane DB promjene | A08: Software or Data Integrity Failures | ✅ |
+| Validacija inputa | marshmallow | Schema validation (Phase 2) | A05: Injection, A06: Insecure Design | ⚠️ |
+| Tajne i konfiguracija | python-dotenv | Secrets u .env | A04: Cryptographic Failures, A02: Security Misconfiguration | ✅ |
+| CORS kontrola | Flask-Cors | Ograničen pristup API-ju | A02: Security Misconfiguration | ✅ |
+| Testing alati | pytest, factory-boy | Testiranje sigurnosti (Phase 2) | A09: Security Logging and Alerting Failures | ⚠️ |
+| Supply chain sigurnost | pinned verzije | Fiksne verzije paketa | A03: Software Supply Chain Failures | ⚠️ |
+
+- ***Pokrivenost kroz README.md:***
+
+| Sigurnosna oblast | Implementacija | Opis | OWASP kategorije | Status |
+|------------------|---------------|------|------------------|--------|
+| RBAC autorizacija | 4-layer security | JWT + role + DB + ORM scoping | A01: Broken Access Control | ✅ |
+| Horizontalna izolacija | ORM scoping | teacher_id / student_id filtering | A01: Broken Access Control | ✅ |
+| Audit logging | AuditLog model | Logovanje svih akcija (success + fail) | A09: Security Logging and Alerting Failures | ✅ |
+| Immutable logovi | ORM events | Nema UPDATE/DELETE nad logovima | A08: Software or Data Integrity Failures | ✅ |
+| Sigurnosni dizajn | Application Factory | Separation of concerns | A06: Insecure Design | ✅ |
+| Token lifecycle | JWT config | Kratki access + refresh tokeni | A07: Authentication Failures | ✅ |
+| HTTPS enforcement | Talisman + nginx | SSL + HSTS | A04: Cryptographic Failures | ✅ |
+| Brute-force zaštita | Rate limiting | Login endpoint zaštita | A07: Authentication Failures | ✅ |
+| Error handling | No stack trace | Sigurne greške u productionu | A02: Security Misconfiguration | ✅ |
+| CSP konfiguracija | Security headers | Osnovni CSP (može jači) | A02: Security Misconfiguration | ⚠️ |
+| Token revocation | Redis blocklist | Planirano u Phase 2 | A07: Authentication Failures | ⚠️ |
+| Input validacija | Marshmallow | Planirano u Phase 2 | A05: Injection | ⚠️ |
+| Security testing | SQLMap, Burp, ZAP | Planirano testiranje | A05: Injection, A01: Broken Access Control | ⚠️ |
+
+- **OWASP Top 10 (2025): Ukupna pokrivenost**
+
+| OWASP 2025 kategorija | Status | Implementacija u projektu | Napomena |
+|-----------------------|--------|----------------------------|----------|
+| A01:2025 - Broken Access Control | ✅ | RBAC (JWT + role + DB provjera) + ORM scoping (teacher_id / student_id) | Nema IDOR ni horizontalne eskalacije |
+| A02:2025 - Security Misconfiguration | ⚠️ | Flask-Talisman (CSP, HSTS, headers), produkcijski config, DEBUG=False | CSP se mora dodatno pooštriti |
+| A03:2025 - Software Supply Chain Failures | ⚠️ | Pinned dependencies u requirements.txt | Nedostaje automated scanning (pip-audit / Dependabot) |
+| A04:2025 - Cryptographic Failures | ✅ | bcrypt hashing, JWT signing, HTTPS enforcement, secrets u .env | Sigurna obrada lozinki i tokena |
+| A05:2025 - Injection | ✅ | SQLAlchemy ORM (bez raw SQL), validacije modela | Potpuna schema validacija (marshmallow) u Phase 2 |
+| A06:2025 - Insecure Design | ✅ | Application Factory, separation of concerns, least privilege | Planirana sigurnost prije implementacije |
+| A07:2025 - Authentication Failures | ✅ | JWT auth, refresh tokeni, rate limiting (Flask-Limiter), bcrypt | Brute-force zaštita implementirana |
+| A08:2025 - Software or Data Integrity Failures | ✅ | Flask-Migrate, nema unsafe funkcija, immutable AuditLog | Kontrolisane promjene i zaštita podataka |
+| A09:2025 - Security Logging and Alerting Failures | ✅ | AuditLog (success + failure eventi), admin viewer | Nema alertinga (može se dodati u Phase 2) |
+| A10:2025 - Mishandling of Exceptional Conditions | ⚠️ | Siguran error handling (bez stack trace), rate limiting | Može se poboljšati centralizovanim monitoring-om |
+
