@@ -197,3 +197,25 @@ def create_user(
         db.session.rollback()
         current_app.logger.error(f"User creation failed: {exc}")
         return None, "User creation failed due to a database error."
+
+
+# ---------------------------------------------------------------------------
+# Token Decoding Utility (Phase 2 — needed for logout refresh token revocation)
+# ---------------------------------------------------------------------------
+
+def decode_token_claims(token_str: str) -> dict | None:
+    """
+    Decode a JWT token string without verifying expiry — used during logout
+    to extract the JTI and exp claims from the refresh token so we can blocklist it.
+
+    SECURITY NOTE: We use decode_token (not verify_jwt_in_request) because the
+    refresh token is not in the Authorization header during logout — it's in the body.
+    We still verify the signature (decode_token verifies by default).
+    Returns None if the token is malformed or the signature is invalid.
+    [OWASP A07:2025 – Authentication Failures]
+    """
+    try:
+        from flask_jwt_extended import decode_token
+        return decode_token(token_str)
+    except Exception:
+        return None

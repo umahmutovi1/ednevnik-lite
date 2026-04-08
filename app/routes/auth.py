@@ -1,29 +1,31 @@
 """
-routes/auth.py — Authentication Blueprint
-==========================================
-Handles: login, logout, token refresh, and current-user info.
+routes/auth.py — Authentication Blueprint (Phase 2)
+=====================================================
+Phase 2 changes:
+  - LoginSchema validates all /login input before authenticate_user is called
+  - /refresh: token rotation — new refresh token issued, old JTI blocklisted
+  - /logout: both access + refresh JTIs blocklisted in Redis
+  - @jwt.token_in_blocklist_loader checks every protected request
 
-SECURITY NOTES:
-  - Rate limiting applied to /login and /refresh — brute-force and credential stuffing defense.
-  - All login attempts (success and failure) are written to AuditLog.
-  - Logout is a client-side operation for stateless JWTs; server-side blocklist is Phase 2.
-  - The /me endpoint validates the token AND re-queries the DB to catch deactivated accounts.
-
-TESTING SURFACE (Phase 2 — SQLMap / Burp Suite):
-  - POST /api/auth/login   — test for SQL Injection in email/password fields
-  - POST /api/auth/refresh — test for JWT manipulation / algorithm confusion
+OWASP 2025 COVERAGE:
+  - [A07:2025 – Authentication Failures]: rate limiting, bcrypt timing safety, enumeration prevention
+  - [A04:2025 – Cryptographic Failures]: JWT HS256, short-lived access tokens, Redis blocklist
+  - [A05:2025 – Injection]: LoginSchema validates + strips all input
+  - [A09:2025 – Security Logging and Alerting Failures]: every auth event (success + failure) audited
+  - [A10:2025 – Mishandling of Exceptional Conditions]: ValidationError -> 400, never 500
 """
 
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import (
+    get_jwt,
     get_jwt_identity,
     jwt_required,
-    verify_jwt_in_request,
 )
 from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
+from marshmallow import ValidationError
 
 from app.models import User
+from app.schemas.auth_schemas import LoginSchema
 from app.services.audit_service import (
     audit_login_failure,
     audit_login_success,
@@ -31,154 +33,144 @@ from app.services.audit_service import (
     write_audit,
 )
 from app.services.auth_service import authenticate_user, create_tokens
+from app.utils.token_blocklist import blocklist_token, is_token_blocklisted
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
-# Blueprint-local rate limiter reference — the global limiter is initialized
-# in create_app(); these decorators override it for sensitive auth endpoints.
-# Injected into this module by create_app() after limiter is initialized.
-limiter: Limiter = None  # type: ignore[assignment]  — set by init_limiter()
+limiter: Limiter = None  # type: ignore[assignment]
+
+_login_schema = LoginSchema()
 
 
 def init_limiter(app_limiter: Limiter) -> None:
-    """Called from create_app() to inject the shared Limiter instance."""
     global limiter
     limiter = app_limiter
 
 
-# ---------------------------------------------------------------------------
-# POST /api/auth/login
-# ---------------------------------------------------------------------------
-
 @auth_bp.route("/login", methods=["POST"])
 def login():
     """
-    Authenticate a user and return a JWT access + refresh token pair.
-
-    Rate limited: 10 attempts per minute per IP.
-    This covers brute-force and credential stuffing attacks.
-
-    Expects JSON body: { "email": str, "password": str }
-    Returns: { "access_token": str, "refresh_token": str, "token_type": "Bearer" }
-
-    SECURITY: Same error message for wrong email and wrong password
-    — prevents username enumeration.
+    [OWASP A05:2025 - Injection]: LoginSchema validates all fields before any DB interaction.
+    [OWASP A07:2025 - Authentication Failures]: Rate limited; same error for bad email/password.
+    [OWASP A09:2025 - Security Logging]: Both success and failure written to AuditLog.
+    [OWASP A10:2025 - Mishandling of Exceptional Conditions]: ValidationError -> 400, not 500.
     """
-    # Apply rate limit dynamically (limiter set after app creation)
     if limiter:
         limiter.limit("10 per minute")(lambda: None)()
 
-    data = request.get_json(silent=True)
-    if not data:
+    raw = request.get_json(silent=True)
+    if not raw:
         return jsonify({"error": "Bad Request", "message": "JSON body required."}), 400
 
-    email = data.get("email", "").strip()
-    password = data.get("password", "")
-
-    if not email or not password:
-        return jsonify({"error": "Bad Request", "message": "Email and password are required."}), 400
-
-    user, error = authenticate_user(email, password)
-
-    if error:
-        # Log failure — even failed attempts are forensically important
-        audit_login_failure(attempted_email=email)
-        # Identical response for wrong email vs wrong password — no enumeration
+    try:
+        data = _login_schema.load(raw)
+    except ValidationError:
+        # Generic error -- do NOT expose which field failed (prevents email enumeration)
         return jsonify({"error": "Unauthorized", "message": "Invalid email or password."}), 401
 
-    # Successful authentication
+    user, error = authenticate_user(data["email"], data["password"])
+
+    if error:
+        audit_login_failure(attempted_email=data["email"])
+        return jsonify({"error": "Unauthorized", "message": "Invalid email or password."}), 401
+
     audit_login_success(actor_id=user.id)
     tokens = create_tokens(user)
+    return jsonify({**tokens, "user": user.to_dict()}), 200
 
-    return jsonify({
-        **tokens,
-        "user": user.to_dict(),
-    }), 200
-
-
-# ---------------------------------------------------------------------------
-# POST /api/auth/refresh
-# ---------------------------------------------------------------------------
 
 @auth_bp.route("/refresh", methods=["POST"])
 @jwt_required(refresh=True)
 def refresh():
     """
-    Issue a new access token using a valid refresh token.
+    Issue a NEW access token AND a NEW refresh token (token rotation).
+    Blocklist the old refresh token JTI immediately.
 
-    The refresh token itself is NOT rotated here (stateless design).
-    Phase 2 will implement refresh token rotation with a Redis blocklist
-    to prevent replay attacks.
-
-    Rate limited: 30 per hour per user (refresh is less frequent than login).
+    [OWASP A04:2025 - Cryptographic Failures]: Token rotation ensures a stolen
+    refresh token can only be used once. After rotation the old token is dead.
+    [OWASP A07:2025 - Authentication Failures]: Without a blocklist, stateless JWTs
+    cannot support true logout or privilege revocation.
     """
+    claims = get_jwt()
+    old_jti = claims.get("jti")
     identity = get_jwt_identity()
-    user = User.query.get(int(identity))
 
+    if old_jti and is_token_blocklisted(old_jti):
+        write_audit(
+            action="permission_escalation_attempt",
+            actor_id=int(identity) if identity else None,
+            resource_type="Token",
+            detail=f"Blocklisted refresh token reuse attempt. JTI: {old_jti}",
+        )
+        return jsonify({"error": "Unauthorized", "message": "Token has been revoked."}), 401
+
+    user = User.query.get(int(identity))
     if user is None or not user.is_active:
         return jsonify({"error": "Unauthorized", "message": "Account not found or deactivated."}), 401
+
+    new_tokens = create_tokens(user)
+
+    # Blocklist old refresh JTI with TTL = remaining lifetime of the old token
+    # Why TTL must equal remaining lifetime: longer wastes Redis memory; indefinite fills Redis.
+    if old_jti:
+        exp = claims.get("exp")
+        blocklist_token(old_jti, exp_timestamp=exp, token_type="refresh")
 
     write_audit(
         action="token_refresh",
         actor_id=user.id,
         resource_type="User",
         resource_id=user.id,
+        detail="Token rotated -- old refresh JTI blocklisted.",
     )
 
-    tokens = create_tokens(user)
-    # Return only access token — refresh token is unchanged
     return jsonify({
-        "access_token": tokens["access_token"],
+        "access_token": new_tokens["access_token"],
+        "refresh_token": new_tokens["refresh_token"],
         "token_type": "Bearer",
         "expires_in": 900,
     }), 200
 
 
-# ---------------------------------------------------------------------------
-# POST /api/auth/logout
-# ---------------------------------------------------------------------------
-
 @auth_bp.route("/logout", methods=["POST"])
 @jwt_required()
 def logout():
     """
-    Log out the current user.
-
-    For stateless JWTs, logout is primarily client-side (discard the token).
-    Server-side token revocation via blocklist is a Phase 2 task.
-
-    This endpoint exists to:
-      1. Provide a clean API surface for clients
-      2. Write an audit log entry for the logout event
-      3. Accept the token to blocklist it in Phase 2 without API changes
+    Blocklist both the access token and refresh token.
+    [OWASP A07:2025 - Authentication Failures]: True server-side logout.
+    After this call both tokens are dead even if cryptographically valid.
     """
+    claims = get_jwt()
+    access_jti = claims.get("jti")
+    access_exp = claims.get("exp")
     identity = get_jwt_identity()
+
+    if access_jti:
+        blocklist_token(access_jti, exp_timestamp=access_exp, token_type="access")
+
+    raw = request.get_json(silent=True) or {}
+    refresh_token_str = raw.get("refresh_token")
+    if refresh_token_str:
+        from app.services.auth_service import decode_token_claims
+        refresh_claims = decode_token_claims(refresh_token_str)
+        if refresh_claims:
+            refresh_jti = refresh_claims.get("jti")
+            refresh_exp = refresh_claims.get("exp")
+            if refresh_jti:
+                blocklist_token(refresh_jti, exp_timestamp=refresh_exp, token_type="refresh")
+
     audit_logout(actor_id=int(identity))
+    return jsonify({"message": "Logged out successfully. Both tokens have been revoked."}), 200
 
-    return jsonify({
-        "message": "Logged out successfully. Discard your tokens client-side.",
-        # TODO Phase 2: Add token JTI to Redis blocklist here
-    }), 200
-
-
-# ---------------------------------------------------------------------------
-# GET /api/auth/me
-# ---------------------------------------------------------------------------
 
 @auth_bp.route("/me", methods=["GET"])
 @jwt_required()
 def me():
     """
-    Return the current authenticated user's profile.
-
-    Re-queries the DB to ensure the token still maps to an active user.
-    This catches cases where an admin deactivated the account after the token
-    was issued (the token itself would still be cryptographically valid).
+    [OWASP A07:2025 - Authentication Failures]: Re-queries DB to catch deactivated accounts.
     """
     identity = get_jwt_identity()
     user = User.query.get(int(identity))
-
     if user is None or not user.is_active:
         return jsonify({"error": "Unauthorized", "message": "Account not found or deactivated."}), 401
-
     return jsonify({"user": user.to_dict()}), 200

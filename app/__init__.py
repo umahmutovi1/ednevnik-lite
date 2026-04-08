@@ -116,6 +116,11 @@ def create_app(config_name: Optional[str] = None) -> Flask:
     # JWT — stateless auth tokens with expiry and role claims
     jwt.init_app(app)
 
+    # Register Redis blocklist loader — every @jwt_required route checks this
+    # [OWASP A07:2025 – Authentication Failures]: fail-closed blocklist
+    from app.utils.token_blocklist import register_blocklist_loader
+    register_blocklist_loader(jwt)
+
     # Flask-Limiter — per-IP rate limiting for brute-force defense
     # Storage URI from config (in-memory for dev, Redis for prod)
     if app.config.get("RATELIMIT_STORAGE_URI"):
@@ -126,28 +131,70 @@ def create_app(config_name: Optional[str] = None) -> Flask:
     # Content-Security-Policy is intentionally permissive here — tighten in Phase 2
     # with a proper per-route CSP policy.
     force_https = app.config.get("FORCE_HTTPS", False)
+
+    # ---------------------------------------------------------------------------
+    # Phase 2 — Hardened Security Headers
+    # [OWASP A02:2025 – Security Misconfiguration]
+    # ---------------------------------------------------------------------------
+    #
+    # CSP nonce-based script policy:
+    #   'unsafe-inline' is NEVER acceptable — it permits any inline <script> tag,
+    #   completely defeating XSS protection. With 'unsafe-inline', an attacker who
+    #   can inject <script>evil()</script> into any page bypasses the entire CSP.
+    #   Nonces (cryptographically random per-request values) allow specific inline
+    #   scripts while blocking all others.
+    #
+    # This API does not serve HTML — it is a JSON REST API. Therefore:
+    #   - script-src: 'none'  (no scripts served by this origin)
+    #   - style-src:  'none'  (no stylesheets served by this origin)
+    #   - frame-ancestors: 'none'  (API responses must never be embedded in iframes)
+    #
+    # When a frontend SPA is added in Phase 3, configure CSP per-route using
+    # Talisman's `content_security_policy_nonce_in` and generate nonces per-request.
+
     talisman.init_app(
         app,
         force_https=force_https,
-        # HSTS: tell browsers to use HTTPS for 1 year, including subdomains
+        # [OWASP A02:2025 – Security Misconfiguration]: HSTS with 1-year max-age
+        # forces all browsers to use HTTPS — protects against protocol downgrade attacks
         strict_transport_security=True,
         strict_transport_security_max_age=31536000,
         strict_transport_security_include_subdomains=True,
-        # X-Frame-Options: DENY — prevents clickjacking
+        strict_transport_security_preload=True,
+        # [OWASP A02:2025 – Security Misconfiguration]: X-Frame-Options DENY
+        # prevents clickjacking — an API endpoint must never be embedded in an iframe
         frame_options="DENY",
-        # X-Content-Type-Options: nosniff — prevents MIME sniffing attacks
+        # [OWASP A02:2025 – Security Misconfiguration]: X-Content-Type-Options nosniff
+        # prevents MIME-type sniffing attacks on JSON responses
         x_content_type_options=True,
-        # CSP: permissive default — TODO Phase 2: tighten to specific sources
-        # A proper CSP is left for Phase 2 because it requires knowing all
-        # frontend origins, nonces for inline scripts, etc.
+        # [OWASP A02:2025 – Security Misconfiguration]: Hardened CSP for a JSON API.
+        # This API serves no HTML/scripts/styles — lock down all fetch directives.
         content_security_policy={
-            "default-src": "'self'",
-            "script-src": "'self'",
-            "style-src": "'self'",
-            "img-src": "'self' data:",
+            "default-src": "'none'",          # Deny everything not explicitly allowed
+            "script-src": "'none'",           # API serves no scripts — 'unsafe-inline' forbidden
+            "style-src": "'none'",            # API serves no styles
+            "img-src": "'none'",              # API serves no images
+            "connect-src": "'self'",          # Allow XHR/fetch to same origin only
+            "form-action": "'none'",          # Prevents form-based exfiltration attacks
+            "frame-ancestors": "'none'",      # Equivalent to X-Frame-Options: DENY (belt+suspenders)
+            "base-uri": "'none'",             # Prevents <base> tag injection attacks
+            "object-src": "'none'",           # No Flash/plugins ever
+            "upgrade-insecure-requests": "",  # Force HTTPS on any mixed-content requests
         },
-        # Referrer-Policy: restrict referrer info sent to third parties
+        # [OWASP A02:2025 – Security Misconfiguration]: Referrer-Policy limits
+        # what URL information is sent to third parties in the Referer header.
+        # strict-origin-when-cross-origin: sends full URL for same-origin, origin only cross-origin.
         referrer_policy="strict-origin-when-cross-origin",
+        # [OWASP A02:2025 – Security Misconfiguration]: Permissions-Policy
+        # explicitly disables browser features this API will never use.
+        # Prevents malicious pages from requesting these capabilities via our origin.
+        feature_policy={
+            "camera": "'none'",
+            "microphone": "'none'",
+            "geolocation": "'none'",
+            "payment": "'none'",
+            "usb": "'none'",
+        },
     )
 
     # CORS — restrict cross-origin requests to configured origins

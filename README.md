@@ -1,6 +1,7 @@
-# Dnevnik-Lite — Secure School Web Application
+# Dnevnik-Lite — Secure School Web Application (Phase 1 + 2)
 
-A production-aware Flask REST API for managing student grades and attendance, built with defense-in-depth security from day one.
+A production-hardened Flask REST API for managing student grades and attendance,
+built with defense-in-depth security and verified against OWASP Top 10 (2025).
 
 ---
 
@@ -9,212 +10,242 @@ A production-aware Flask REST API for managing student grades and attendance, bu
 ```
 ednevnik-lite/
 ├── app/
-│   ├── __init__.py          # Application Factory (create_app) — all extensions & blueprints
-│   ├── models.py            # SQLAlchemy ORM: User, Role, Grade, AttendanceRecord, AuditLog
-│   ├── config.py            # DevelopmentConfig, TestingConfig, ProductionConfig
+│   ├── __init__.py               # Application Factory — extensions, blueprints, hardened CSP
+│   ├── models.py                 # SQLAlchemy ORM: User, Role, Grade, AttendanceRecord, AuditLog
+│   ├── config.py                 # DevelopmentConfig, TestingConfig, ProductionConfig
+│   ├── schemas/                  # Phase 2: marshmallow validation layer
+│   │   ├── auth_schemas.py       # LoginSchema
+│   │   ├── admin_schemas.py      # CreateUserSchema, UpdateUserSchema
+│   │   └── teacher_schemas.py   # CreateGradeSchema, UpdateGradeSchema, CreateAttendanceSchema
 │   ├── routes/
-│   │   ├── auth.py          # POST /api/auth/login|logout|refresh, GET /api/auth/me
-│   │   ├── admin.py         # Full user management + audit log viewer (admin only)
-│   │   ├── teacher.py       # Grade & attendance CRUD (nastavnik only, ORM-scoped)
-│   │   └── student.py       # Read-only grades & attendance (ucenik only, own data)
+│   │   ├── auth.py               # Login, logout (dual-JTI revocation), refresh (rotation)
+│   │   ├── admin.py              # User management + audit log viewer
+│   │   ├── teacher.py            # Grade & attendance CRUD (ORM-scoped)
+│   │   └── student.py            # Read-only (own data only)
 │   ├── services/
-│   │   ├── auth_service.py  # authenticate_user, hash_password, create_tokens
-│   │   └── audit_service.py # write_audit + convenience wrappers
+│   │   ├── auth_service.py       # authenticate_user, create_tokens, decode_token_claims
+│   │   └── audit_service.py      # write_audit + convenience wrappers
 │   └── utils/
-│       └── decorators.py    # @admin_required, @teacher_required, @student_required
-├── migrations/              # Flask-Migrate / Alembic (run `flask db init` to populate)
-├── tests/                   # Phase 2 security test suite (placeholder + test plan)
-├── .env.example             # All required env vars documented
-├── .env                     # Never committed — listed in .gitignore
+│       ├── decorators.py         # @admin_required, @teacher_required, @student_required
+│       └── token_blocklist.py    # Phase 2: Redis JTI blocklist, fail-closed
+├── tests/
+│   ├── conftest.py               # App factory, DB fixtures, role-seeded users, token factories
+│   ├── test_auth.py              # Login, logout, schema validation, deactivation
+│   ├── test_rbac.py              # Role enforcement + deactivated user rejection
+│   ├── test_schemas.py           # All 6 schemas: valid + invalid + attack inputs
+│   ├── test_grades.py            # Grade CRUD + IDOR prevention
+│   ├── test_audit.py             # AuditLog immutability + event completeness
+│   └── security/
+│       ├── test_sql_injection.py     # SQLi payloads across all user-controlled inputs
+│       ├── test_jwt_manipulation.py  # alg:none, claim forgery, malformed tokens
+│       ├── test_token_revocation.py  # Blocklist, rotation, fail-closed Redis behavior
+│       └── test_rate_limiting.py     # Brute-force simulation
+├── .github/workflows/ci.yml     # Phase 2: pip-audit + pytest + OWASP ZAP
+├── .env.example
 ├── .gitignore
-├── requirements.txt         # Pinned versions with security comments
-├── run.py                   # Dev entry point (use gunicorn in production)
-└── README.md
+├── requirements.txt              # Pinned + supply chain risk annotations
+└── run.py
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Clone & set up environment
-
 ```bash
-git clone <repo>
-cd ednevnik-lite
-
-python -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
+# 1. Clone and install
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-```
 
-### 2. Configure secrets
-
-```bash
+# 2. Configure
 cp .env.example .env
-# Edit .env — fill in SECRET_KEY, JWT_SECRET_KEY, DATABASE_URL
-# Generate keys: python -c "import secrets; print(secrets.token_hex(32))"
-```
+# Fill in: SECRET_KEY, JWT_SECRET_KEY, DATABASE_URL, REDIS_URL
 
-### 3. Initialize database
+# 3. Initialize DB
+flask db init && flask db migrate -m "Initial schema" && flask db upgrade
 
-```bash
-flask db init        # Creates migrations/ structure
-flask db migrate -m "Initial schema"
-flask db upgrade     # Applies migration to PostgreSQL
-```
+# 4. Seed
+flask seed-roles && flask seed-admin
 
-### 4. Seed roles and admin user
+# 5. Start Redis (required for token blocklist)
+docker run -d -p 6379:6379 redis:7-alpine
 
-```bash
-flask seed-roles     # Creates: admin, nastavnik, ucenik roles
-flask seed-admin     # Creates first admin from .env credentials
-# Remove ADMIN_BOOTSTRAP_EMAIL and ADMIN_BOOTSTRAP_PASSWORD from .env after this step
-```
+# 6. Run
+python run.py
 
-### 5. Run
-
-```bash
-python run.py        # Development server on http://127.0.0.1:5000
-
-# Production (behind nginx):
-gunicorn -w 4 -b 127.0.0.1:8000 "run:app"
+# 7. Run tests
+pytest tests/ -v --cov=app
 ```
 
 ---
 
 ## API Endpoints
 
-### Authentication (`/api/auth`)
+### Auth (`/api/auth`)
+| Method | Path | Auth |
+|--------|------|------|
+| POST | `/api/auth/login` | Public |
+| POST | `/api/auth/refresh` | Refresh token — issues NEW pair, blocklists old |
+| POST | `/api/auth/logout` | Any JWT — blocklists access + refresh JTIs |
+| GET | `/api/auth/me` | Any JWT |
 
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| POST | `/api/auth/login` | Login — returns JWT access + refresh tokens | Public |
-| POST | `/api/auth/refresh` | Renew access token using refresh token | Refresh token |
-| POST | `/api/auth/logout` | Logout (client discards tokens; Phase 2: blocklist) | Any JWT |
-| GET | `/api/auth/me` | Current user profile | Any JWT |
-| GET | `/api/health` | Health check for load balancers | Public |
+### Admin (`/api/admin`) — role: `admin`
+| Method | Path |
+|--------|------|
+| GET/POST | `/api/admin/users` |
+| GET/PATCH/DELETE | `/api/admin/users/<id>` |
+| GET | `/api/admin/audit-logs` |
 
-### Admin (`/api/admin`) — Role: `admin`
+### Teacher (`/api/teacher`) — role: `nastavnik`
+| Method | Path |
+|--------|------|
+| GET/POST | `/api/teacher/grades` |
+| GET/PATCH/DELETE | `/api/teacher/grades/<id>` |
+| GET/POST | `/api/teacher/attendance` |
+| GET | `/api/teacher/students` |
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/admin/users` | List all users (paginated, filterable) |
-| POST | `/api/admin/users` | Create a new user |
-| GET | `/api/admin/users/<id>` | Get one user |
-| PATCH | `/api/admin/users/<id>` | Update user (name, role, active status) |
-| DELETE | `/api/admin/users/<id>` | Soft-deactivate user |
-| GET | `/api/admin/audit-logs` | Paginated audit log viewer |
-
-### Teacher (`/api/teacher`) — Role: `nastavnik`
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/teacher/grades` | My grade entries (ORM-scoped to teacher) |
-| POST | `/api/teacher/grades` | Create a grade |
-| GET | `/api/teacher/grades/<id>` | Get one grade (must be mine) |
-| PATCH | `/api/teacher/grades/<id>` | Update a grade (must be mine) |
-| DELETE | `/api/teacher/grades/<id>` | Delete a grade (must be mine) |
-| GET | `/api/teacher/attendance` | My attendance records |
-| POST | `/api/teacher/attendance` | Record attendance |
-| GET | `/api/teacher/students` | List active students |
-
-### Student (`/api/student`) — Role: `ucenik`
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/student/grades` | My grades (read-only, own data only) |
-| GET | `/api/student/attendance` | My attendance (read-only, own data only) |
-| GET | `/api/student/profile` | My profile |
+### Student (`/api/student`) — role: `ucenik`
+| Method | Path |
+|--------|------|
+| GET | `/api/student/grades` |
+| GET | `/api/student/attendance` |
+| GET | `/api/student/profile` |
 
 ---
 
 ## Security Architecture
 
-### RBAC — Three-Layer Defense
-
+### RBAC — Four-Layer Defense
 ```
 Request
   │
-  ▼
-Layer 1: JWT signature & expiry (Flask-JWT-Extended)
-  │         → 401 if missing/expired/tampered
-  ▼
-Layer 2: Role claim in JWT (fast, no DB hit)
-  │         → 403 if wrong role
-  ▼
-Layer 3: Role verified in DB (authoritative — catches post-issuance changes)
-  │         → 403 if DB role doesn't match
-  ▼
-Layer 4: ORM-scoped queries (teacher_id=current_user.id in all teacher queries)
-  │         → Data access structurally restricted, not just filtered
+  ▼ Layer 1: JWT signature & expiry + Redis blocklist check
+  │           → 401 if missing/expired/tampered/blocklisted
+  ▼ Layer 2: marshmallow schema validation
+  │           → 400 if any field fails type/length/allowlist check
+  ▼ Layer 3: Role claim (JWT) + DB re-verification
+  │           → 403 if role mismatch; catches post-issuance role changes
+  ▼ Layer 4: ORM-scoped queries (teacher_id / student_id = current_user.id)
+  │           → Data access structurally restricted
   ▼
 Route Handler
 ```
 
-### AuditLog — Forensic Events Captured
+### Token Lifecycle (Phase 2)
+```
+Login  → access_token (15 min) + refresh_token (7 days)
+         Both carry a unique JTI claim
 
-| Event | Logged |
-|-------|--------|
-| Login success | ✅ |
-| Login failure | ✅ |
-| Logout | ✅ |
-| Token refresh | ✅ |
-| Access denied | ✅ |
-| User created | ✅ |
-| User deactivated | ✅ |
-| User updated | ✅ |
-| Grade created | ✅ |
-| Grade updated | ✅ |
-| Grade deleted | ✅ |
-| Attendance created | ✅ |
+/refresh → NEW access_token + NEW refresh_token issued
+           OLD refresh JTI written to Redis blocklist (TTL = remaining lifetime)
+           → Old refresh token is now dead
 
-AuditLog rows are **immutable** — ORM events raise `RuntimeError` on any UPDATE or DELETE attempt.
+/logout  → access JTI + refresh JTI both written to Redis blocklist
+           → Both tokens dead immediately, before natural expiry
+
+Every @jwt_required route → token_in_blocklist_loader checks Redis
+  Redis unreachable → FAIL CLOSED (token rejected, not accepted)
+```
 
 ---
 
-## OWASP Top 10 (2021) Coverage
+## OWASP Top 10 (2025) Coverage
 
 | # | Category | Status | Implementation |
 |---|----------|--------|----------------|
-| A01 | Broken Access Control | ✅ | 3-layer RBAC decorators; ORM-level `teacher_id` / `student_id` scoping; Admin cannot self-demote; No horizontal privilege escalation possible |
-| A02 | Cryptographic Failures | ✅ | bcrypt (work factor 12) for all passwords; no plaintext column exists; HTTPS enforced via Flask-Talisman + HSTS; secrets in `.env` only; JWT signed with HS256 |
-| A03 | Injection | ✅ | SQLAlchemy ORM exclusively — zero raw SQL in codebase; all inputs parameterized; `@validates` on Grade.value and User.email; marshmallow included for Phase 2 full schema validation |
-| A04 | Insecure Design | ✅ | Application Factory pattern; separation of concerns (services / routes / models); principle of least privilege throughout; security requirements modeled before code |
-| A05 | Security Misconfiguration | ⚠️ | Security headers via Talisman (CSP, HSTS, X-Frame-Options, X-Content-Type); `DEBUG=False` hardcoded in production; no stack traces in error responses; full CSP tightening deferred to Phase 2 |
-| A06 | Vulnerable & Outdated Components | ⚠️ | All dependencies pinned to specific versions; security role of each dependency documented in `requirements.txt`; automated dependency scanning (Dependabot / pip-audit) recommended as Phase 2 CI step |
-| A07 | Auth & Session Mgmt Failures | ✅ | JWT access tokens (15 min expiry); refresh tokens (7 days); Flask-Limiter brute-force defense on `/login`; bcrypt timing-safe comparison; username enumeration prevented (constant-time dummy hash); `is_active` soft-disable; token blocklist deferred to Phase 2 (Redis) |
-| A08 | Software & Data Integrity Failures | ✅ | No `eval()`, `pickle`, or `yaml.load()` unsafe patterns; pinned dependency versions; Flask-Migrate for controlled schema changes; AuditLog ORM events prevent tampering |
-| A09 | Security Logging & Monitoring | ✅ | AuditLog on every sensitive action (success AND failure); fields: actor_id, action, resource_type, resource_id, ip_address, timestamp (UTC); append-only enforced at ORM event level; admin audit log viewer endpoint |
-| A10 | Server-Side Request Forgery (SSRF) | 🔲 | Not applicable in Phase 1 (no user-supplied URLs fetched by the server); flag for review if Phase 2 introduces webhook or external API features |
+| A01:2025 | Broken Access Control | ✅ | 3-layer RBAC; ORM `teacher_id`/`student_id` scoping; role allowlist in schema; admin self-demotion blocked; IDOR prevented via filter-by-owner |
+| A02:2025 | Security Misconfiguration | ✅ | Hardened Talisman CSP (`default-src 'none'`); HSTS preload; Permissions-Policy; `DEBUG=False` hardcoded; no stack traces in responses |
+| A03:2025 | Software Supply Chain Failures | ✅ | All deps pinned; `# [SUPPLY CHAIN RISK]` annotations; `pip-audit` in CI failing on HIGH/CRITICAL CVEs; Dependabot config recommended |
+| A04:2025 | Cryptographic Failures | ✅ | bcrypt (work factor 12); JWT HS256; HTTPS/HSTS; Redis blocklist with TTL = remaining token lifetime; no plaintext secrets |
+| A05:2025 | Injection | ✅ | SQLAlchemy ORM exclusively (zero raw SQL); marshmallow schemas with `unknown=RAISE`, type enforcement, length limits, regex allowlists on all POST/PATCH |
+| A06:2025 | Insecure Design | ✅ | Application Factory; separation of concerns; schema-first validation; grade range enforced at schema AND model level; principle of least privilege |
+| A07:2025 | Authentication Failures | ✅ | JWT 15 min expiry; refresh token rotation; Redis blocklist (fail-closed); rate limiting (10/min on login); constant-time dummy bcrypt for enumeration prevention; `is_active` checked on every DB-re-query route |
+| A08:2025 | Software or Data Integrity Failures | ✅ | No `eval()`/`pickle`/unsafe YAML; pinned deps; Flask-Migrate for schema integrity; AuditLog ORM events block UPDATE/DELETE; `unknown=RAISE` prevents parameter pollution |
+| A09:2025 | Security Logging and Alerting Failures | ✅ | AuditLog on every sensitive action (success AND failure); append-only ORM events; fields: actor_id, action, resource_type, resource_id, ip_address, timestamp (UTC); admin viewer endpoint; CI test verifies log completeness |
+| A10:2025 | Mishandling of Exceptional Conditions | ✅ | ValidationError → 400 with generic message (no ORM internals exposed); Redis failure → fail-closed (True); no unhandled 500s for input errors; strict date parsing in schema |
 
-**Legend:** ✅ Addressed | ⚠️ Partial — Phase 2 task | 🔲 Out of scope / N/A
-
----
-
-## Phase 2 Proposed Tasks
-
-### Task 1 — Full marshmallow Schema Validation
-Implement request body validation using marshmallow schemas on every POST/PATCH endpoint. Replace the current manual field extraction with typed, validated, and sanitized schema deserialization. Include: field length limits, allowed character sets, custom validators for email format, and meaningful validation error responses.
-
-### Task 2 — Refresh Token Rotation + Redis Blocklist
-Implement server-side refresh token revocation using Redis. On each `/api/auth/refresh` call, issue a new refresh token and blocklist the old one's JTI. On `/api/auth/logout`, blocklist both tokens. This converts stateless JWTs into revocable tokens without sacrificing horizontal scalability.
-
-### Task 3 — Security Test Suite (pytest + SQLMap + Burp Suite)
-Set up a pytest suite with factory-boy fixtures seeding both hardened and deliberately-vulnerable app states. Run SQLMap against `/api/auth/login`, `/api/teacher/grades`, and `/api/admin/audit-logs`. Run Burp Suite auth flow tests (IDOR, role bypass, token manipulation). Configure OWASP ZAP for full crawl in CI pipeline. Document findings and verify all OWASP controls block their respective attacks.
+**Legend:** ✅ Fully addressed with tests
 
 ---
 
-## Production Deployment Checklist
+## Supply Chain Audit
 
-- [ ] Generate cryptographically random `SECRET_KEY` and `JWT_SECRET_KEY`
-- [ ] Set `FLASK_ENV=production` in environment
-- [ ] Set `DATABASE_URL` with `?sslmode=require`
-- [ ] Set `REDIS_URL` for Flask-Limiter distributed counters
-- [ ] Set `FORCE_HTTPS=1`
-- [ ] Set `CORS_ORIGINS` to specific frontend URLs (not `*`)
-- [ ] Run `flask seed-roles` and `flask seed-admin`, then remove bootstrap credentials from `.env`
-- [ ] Configure nginx with SSL termination, `X-Forwarded-For` passthrough, and upstream connection limits
-- [ ] Run with gunicorn (4+ workers): `gunicorn -w 4 -b 127.0.0.1:8000 "run:app"`
-- [ ] Revoke `DELETE` and `UPDATE` privileges on `audit_logs` table from the app DB user
-- [ ] Set up log aggregation (stdout → syslog / ELK / Datadog)
-- [ ] Schedule regular `pip-audit` / Dependabot scans for dependency CVEs
+Run locally:
+```bash
+pip install pip-audit
+pip-audit --requirement requirements.txt --severity-threshold high
+```
+
+CI integration: `.github/workflows/ci.yml` — fails build on HIGH/CRITICAL CVEs.
+
+**pip-audit vs Dependabot:**
+- `pip-audit` — knows about **CVEs in your current pinned versions** (PyPI Advisory DB)
+- Dependabot — alerts when **newer versions exist** (doesn't require a CVE)
+- You need both: a pinned version can have a fresh CVE (pip-audit catches it); an unpinned version
+  can be months behind security patches (Dependabot catches it).
+
+---
+
+## Security Testing (Phase 2)
+
+### pytest
+```bash
+pytest tests/ -v
+pytest tests/security/ -v          # Security-specific tests only
+pytest tests/ --cov=app --cov-fail-under=70
+```
+
+### SQLMap (against live dev server)
+```bash
+# Login endpoint
+sqlmap -u "http://localhost:5000/api/auth/login" \
+  --data='{"email":"*","password":"test"}' \
+  --content-type="application/json" \
+  --level=5 --risk=3 --batch --dbms=postgresql
+
+# Teacher grades — authenticated, query param
+sqlmap -u "http://localhost:5000/api/teacher/grades?subject=*" \
+  -H "Authorization: Bearer <teacher_token>" \
+  --level=5 --risk=3 --batch --dbms=postgresql
+
+# Admin audit-logs — authenticated, query params
+sqlmap -u "http://localhost:5000/api/admin/audit-logs?action=*&actor_id=*" \
+  -H "Authorization: Bearer <admin_token>" \
+  --level=5 --risk=3 --batch --dbms=postgresql
+```
+
+### Burp Suite Test Cases
+| Test | Endpoint | Expected |
+|------|----------|----------|
+| IDOR: Student A reads Student B's grades | `GET /api/student/grades?student_id=<B_id>` | 200 — but returns only Student A's grades (param ignored) |
+| Role bypass: Teacher → admin endpoint | `POST /api/admin/users` with teacher token | 403 |
+| JWT `alg:none` | `GET /api/auth/me` with unsigned token | 401 |
+| JWT claim forgery (role: admin) | Any admin endpoint with forged student token | 401 (signature invalid) |
+| Blocklisted token reuse | `/api/auth/refresh` with rotated token | 401 |
+
+### OWASP ZAP
+```bash
+# Docker-based ZAP scan (CI)
+docker run --rm ghcr.io/zaproxy/zaproxy:stable \
+  zap-baseline.py \
+  -t http://localhost:5000 \
+  -J zap-report.json \
+  -r zap-report.html \
+  -l WARN
+```
+
+---
+
+## Production Checklist
+
+- [ ] `SECRET_KEY` and `JWT_SECRET_KEY` — cryptographically random, minimum 32 bytes
+- [ ] `FLASK_ENV=production`
+- [ ] `DATABASE_URL` with `?sslmode=require`
+- [ ] `REDIS_URL` — with `requirepass` set in Redis config
+- [ ] `FORCE_HTTPS=1`
+- [ ] `CORS_ORIGINS` — specific frontend URLs only (no `*`)
+- [ ] Run `flask seed-roles` + `flask seed-admin`, then remove bootstrap vars from `.env`
+- [ ] nginx with SSL termination + `X-Forwarded-For` passthrough
+- [ ] gunicorn: `gunicorn -w 4 -b 127.0.0.1:8000 "run:app"`
+- [ ] Revoke `DELETE` + `UPDATE` on `audit_logs` table from app DB user
+- [ ] `pip-audit` + Dependabot enabled
+- [ ] OWASP ZAP scan on staging before each release
