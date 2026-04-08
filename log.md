@@ -99,11 +99,54 @@
 **Šta sam tražila:** Input Validation via marshmallow (Schema), Security Headers & Configuration Hardening, Dependency Audit & Supply Chain Security, Refresh Token Rotation + Redis Blocklist
 
 **Šta je Claude generisao:**
+- app/schemas/auth_schemas.py (LoginSchema)
+- app/schemas/admin_schemas.py (CreateUserSchema, UpdateUserSchema)
+- app/schemas/teacher_schemas.py (CreateGradeSchema, 
+  UpdateGradeSchema, CreateAttendanceSchema)
+- app/utils/token_blocklist.py (Redis JTI blocklist, fail-closed)
+- Ažurirani app/routes/auth.py (refresh rotacija, dual-JTI logout)
+- Ažurirani app/routes/admin.py (schema validacija)
+- Ažurirani app/routes/teacher.py (schema validacija)
+- Ažurirani app/__init__.py (hardened CSP, blocklist registracija)
+- Ažurirani requirements.txt (marshmallow, redis dodani)
+- Ažurirani README.md (kompletna OWASP tabela)
 
 **Šta je ispravno implementirano:**
+- Marshmallow sheme sa unknown=RAISE na svim endpointima
+- Regex allowlisti za name i subject polja (XSS prevencija)
+- bcrypt DoS zaštita (max 128 char na password polju)
+- Role ID allowlist u shemi (sprječava FK error disclosure)
+- Redis JTI blocklist sa fail-closed pristupom
+- Refresh token rotacija (stari JTI odmah na blocklist)
+- Dual-JTI logout (access + refresh oba revocirana)
+- Hardened CSP: default-src 'none' (API ne servira HTML)
+- HSTS preload, Permissions-Policy, Referrer-Policy
+- Supply chain: pinned verzije + pip-audit instrukcije
 
 **Šta sam morala ručno ispraviti:**
+- Ništa — kod je funkcionalan
 
 **Identificirane slabosti:**
+- _ALLOWED_ROLE_IDS je hardkodiran (kompromis,
+  dokumentovan u komentaru)
+- CI/CD workflow (ci.yml) se spominje u README kao dio strukture ali 
+  nije implementiran
 
 ***Napomene:***
+
+**OWASP pokrivenost nakon Faze 2:**
+
+| OWASP 2025 kategorija | Status | Napomena |
+|----------------------|--------|----------|
+| A01 - Broken Access Control | ✅ | RBAC + ORM scoping |
+| A02 - Security Misconfiguration | ✅ | Hardened CSP, HSTS |
+| A03 - Supply Chain Failures | ✅ | Pinned deps, pip-audit |
+| A04 - Cryptographic Failures | ✅ | bcrypt + JWT + blocklist |
+| A05 - Injection | ✅ | ORM + marshmallow sheme |
+| A06 - Insecure Design | ✅ | Schema-first validation |
+| A07 - Authentication Failures | ✅ | Rotacija + blocklist |
+| A08 - Data Integrity Failures | ✅ | Immutable AuditLog |
+| A09 - Logging Failures | ✅ | Kompletni AuditLog |
+| A10 - Exceptional Conditions | ✅ | Fail-closed Redis |
+
+- Sljedeći korak je testiranje aplikacije (SQLMap, OWASP ZAP, Burp Suite)
