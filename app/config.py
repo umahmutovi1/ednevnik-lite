@@ -1,14 +1,11 @@
 """
-config.py — Dnevnik-Lite Configuration Layer
-=============================================
-Three config classes cover the full deployment lifecycle:
-  - DevelopmentConfig  : local dev, DEBUG on, relaxed cookie/HTTPS settings
-  - TestingConfig      : pytest runs, in-memory SQLite, fast bcrypt
-  - ProductionConfig   : hardened, HTTPS-only, Redis, strict cookies
-
-SECURITY NOTE: SECRET_KEY and JWT_SECRET_KEY are read exclusively from
-environment variables. The application raises ValueError at startup if
-either is missing — this prevents silent fallback to weak defaults.
+config.py — Dnevnik-Lite Configuration Layer (Audit-Fixed)
+===========================================================
+AUDIT FIXES APPLIED:
+  CF-01: Dead-code `if False` branch removed from ProductionConfig.
+         RATELIMIT_STORAGE_URI is now set ONLY inside init_secrets().
+  CF-03: TestingConfig hardcoded secrets replaced with os.urandom() defaults.
+  CF-04: JWT_ALGORITHM and JWT_DECODE_ALGORITHMS added to BaseConfig.
 """
 
 import os
@@ -16,76 +13,46 @@ from datetime import timedelta
 
 
 class BaseConfig:
-    """
-    Shared settings inherited by all environments.
-    Defaults here are the MOST RESTRICTIVE values; child classes
-    may only relax them when explicitly justified.
-    """
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
 
-    # -------------------------------------------------------------------------
-    # Secrets — MUST come from environment; no hardcoded fallbacks
-    # -------------------------------------------------------------------------
     @staticmethod
     def _require_env(key: str) -> str:
-        """Raise loudly at startup if a required secret is absent."""
         value = os.environ.get(key)
         if not value:
             raise ValueError(
                 f"[Security] Environment variable '{key}' is required but not set. "
-                "Check your .env file. The application will not start without it."
+                "Check your .env file."
             )
         return value
 
-    # -------------------------------------------------------------------------
-    # SQLAlchemy
-    # -------------------------------------------------------------------------
-    SQLALCHEMY_TRACK_MODIFICATIONS = False  # Disable event system overhead
-
-    # -------------------------------------------------------------------------
-    # JWT — Flask-JWT-Extended
-    # Access tokens expire in 15 minutes:
-    #   - Limits damage window if a token is stolen or leaked in logs/headers.
-    #   - Short enough to reduce exposure; client must use refresh token to renew.
-    # Refresh tokens expire in 7 days:
-    #   - UX tradeoff: users don't have to re-login daily.
-    #   - Refresh tokens are longer-lived but can be revoked server-side (blocklist).
-    #   - Rotating refresh tokens (new refresh token on each use) prevents replay attacks.
-    # -------------------------------------------------------------------------
+    # JWT
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=15)
     JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=7)
-    JWT_TOKEN_LOCATION = ["headers"]          # Accept tokens only in Authorization header
+    JWT_TOKEN_LOCATION = ["headers"]
     JWT_HEADER_NAME = "Authorization"
     JWT_HEADER_TYPE = "Bearer"
 
-    # -------------------------------------------------------------------------
+    # [OWASP A04:2025 – Cryptographic Failures]: Explicitly lock algorithm.
+    # JWT_DECODE_ALGORITHMS is a strict allowlist — alg:none and all other
+    # algorithms are structurally rejected by PyJWT before any verification logic.
+    # CF-04: These were missing; added by audit.
+    JWT_ALGORITHM = "HS256"
+    JWT_DECODE_ALGORITHMS = ["HS256"]
+
     # Session Cookies
-    # SECURE: cookie is only sent over HTTPS — prevents cleartext sniffing.
-    # HTTPONLY: JavaScript cannot read the cookie — mitigates XSS token theft.
-    # SAMESITE='Lax': blocks cross-site request forgery (CSRF) in most cases
-    #   without breaking normal navigation links.
-    # -------------------------------------------------------------------------
     SESSION_COOKIE_SECURE = True
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = "Lax"
 
-    # -------------------------------------------------------------------------
-    # Rate Limiting defaults (Flask-Limiter)
-    # Production MUST override RATELIMIT_STORAGE_URI with Redis.
-    # -------------------------------------------------------------------------
+    # Rate Limiting defaults
     RATELIMIT_DEFAULT = "200 per day;50 per hour"
-    RATELIMIT_HEADERS_ENABLED = True          # Expose X-RateLimit-* headers to clients
+    RATELIMIT_HEADERS_ENABLED = True
 
 
 class DevelopmentConfig(BaseConfig):
-    """
-    Local development — convenience over maximum security.
-    DEBUG is True; HTTPS is not enforced; cookies are non-secure
-    so plain HTTP (localhost) works without cert setup.
-    """
     DEBUG = True
     TESTING = False
 
-    # Secrets — still read from .env, never hardcoded
     @classmethod
     def init_secrets(cls):
         cls.SECRET_KEY = BaseConfig._require_env("SECRET_KEY")
@@ -94,64 +61,51 @@ class DevelopmentConfig(BaseConfig):
             "DATABASE_URL", "postgresql://dnevnik_user:changeme@localhost:5432/dnevnik_lite"
         )
 
-    # bcrypt work factor — lower in dev to speed up login during development
-    # MUST be 12+ in production
     BCRYPT_LOG_ROUNDS = int(os.environ.get("BCRYPT_LOG_ROUNDS", 10))
-
-    # Relax cookie security for HTTP localhost
     SESSION_COOKIE_SECURE = False
-
-    # TODO: Production — switch storage to Redis
+    # TODO-RESOLVED (Phase 2): Redis blocklist is in app/utils/token_blocklist.py
     RATELIMIT_STORAGE_URI = "memory://"
-
     FORCE_HTTPS = False
 
 
 class TestingConfig(BaseConfig):
-    """
-    pytest test suite — fast, isolated, no real DB or network.
-    """
     DEBUG = False
     TESTING = True
-
-    # In-memory SQLite — fast, isolated, destroyed after each test run
-    # No SSL mode needed (not PostgreSQL)
     SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
 
-    # Placeholder secrets for tests — tests must not use real credentials
-    SECRET_KEY = "test-secret-key-not-for-production"          # noqa: S105
-    JWT_SECRET_KEY = "test-jwt-secret-key-not-for-production"  # noqa: S105
+    # [OWASP A04:2025 – Cryptographic Failures]: CF-03 FIXED.
+    # os.urandom() generates a fresh cryptographically random key each test run.
+    # This avoids any hardcoded string literal that SonarQube rule S6290 would flag
+    # as a BLOCKER. Tests that need stable tokens across calls should set
+    # TEST_SECRET_KEY and TEST_JWT_SECRET_KEY as env vars in CI.
+    SECRET_KEY = os.environ.get("TEST_SECRET_KEY", os.urandom(32).hex())
+    JWT_SECRET_KEY = os.environ.get("TEST_JWT_SECRET_KEY", os.urandom(32).hex())
 
-    # bcrypt work factor 4: absolute minimum, only acceptable in tests
-    # Makes hashing near-instant so test suites don't time out
     BCRYPT_LOG_ROUNDS = 4
-
     SESSION_COOKIE_SECURE = False
-
-    # Disable rate limiting in tests so fixtures don't trip limits
     RATELIMIT_ENABLED = False
-
-    # TODO: Production — switch storage to Redis
     RATELIMIT_STORAGE_URI = "memory://"
-
     FORCE_HTTPS = False
-
-    # JWT very short in tests — we want to test expiry behavior easily
-    # Override per-test with app.config.update() where needed
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(seconds=5)
 
 
 class ProductionConfig(BaseConfig):
-    """
-    Production — maximum security. No DEBUG, HTTPS enforced, Redis required.
-    This class will RAISE at startup if required environment variables are absent.
-    """
-
-    # DEBUG is HARDCODED False — never trust an env var for this alone.
-    # A misconfigured environment variable could accidentally enable debug mode,
-    # exposing stack traces, the interactive debugger, and internal state.
+    # [OWASP A02:2025 – Security Misconfiguration]: DEBUG hardcoded False.
+    # Never trust an env var for this — a misconfiguration could expose the
+    # Werkzeug interactive debugger.
     DEBUG = False
     TESTING = False
+    BCRYPT_LOG_ROUNDS = int(os.environ.get("BCRYPT_LOG_ROUNDS", 12))
+    SESSION_COOKIE_SECURE = True
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = "Lax"
+    FORCE_HTTPS = bool(int(os.environ.get("FORCE_HTTPS", 1)))
+
+    # CF-01 FIXED: No class-level RATELIMIT_STORAGE_URI assignment.
+    # The dead-code `if False else None` sentinel has been removed.
+    # RATELIMIT_STORAGE_URI is set exclusively inside init_secrets() below,
+    # preventing silent fallback to in-memory storage if init_secrets() is
+    # ever skipped or called out of order.
 
     @classmethod
     def init_secrets(cls):
@@ -159,46 +113,16 @@ class ProductionConfig(BaseConfig):
         cls.JWT_SECRET_KEY = BaseConfig._require_env("JWT_SECRET_KEY")
 
         db_url = BaseConfig._require_env("DATABASE_URL")
-        # Enforce SSL on all production DB connections to prevent
-        # cleartext credential and data exposure in transit
         if "sslmode" not in db_url:
             db_url += "?sslmode=require"
         cls.SQLALCHEMY_DATABASE_URI = db_url
 
-    # bcrypt work factor 12: NIST-recommended minimum for production.
-    # ~300ms per hash — slow enough to deter brute force, fast enough for UX.
-    BCRYPT_LOG_ROUNDS = int(os.environ.get("BCRYPT_LOG_ROUNDS", 12))
-
-    # Strict cookies — HTTPS only, not readable by JS
-    SESSION_COOKIE_SECURE = True
-    SESSION_COOKIE_HTTPONLY = True
-    SESSION_COOKIE_SAMESITE = "Lax"
-
-    # Redis for distributed rate limiting — in-memory is single-process only
-    # and resets on restart (useless for production brute-force defense)
-    RATELIMIT_STORAGE_URI = BaseConfig._require_env.__func__(
-        None  # evaluated lazily in init_app
-    ) if False else None  # Sentinel — real value set in init_secrets
-
-    @classmethod
-    def init_secrets(cls):  # type: ignore[override]
-        cls.SECRET_KEY = BaseConfig._require_env("SECRET_KEY")
-        cls.JWT_SECRET_KEY = BaseConfig._require_env("JWT_SECRET_KEY")
-
-        db_url = BaseConfig._require_env("DATABASE_URL")
-        if "sslmode" not in db_url:
-            db_url += "?sslmode=require"
-        cls.SQLALCHEMY_DATABASE_URI = db_url
-
-        # Redis for Flask-Limiter — required in production
+        # [OWASP A07:2025 – Authentication Failures]: Redis required in production.
+        # In-memory limiter resets on every worker restart and is not shared across
+        # gunicorn workers — brute-force protection is meaningless without this.
         cls.RATELIMIT_STORAGE_URI = BaseConfig._require_env("REDIS_URL")
 
-    FORCE_HTTPS = bool(int(os.environ.get("FORCE_HTTPS", 1)))
 
-
-# ---------------------------------------------------------------------------
-# Config registry — referenced by create_app() via FLASK_ENV
-# ---------------------------------------------------------------------------
 config_map = {
     "development": DevelopmentConfig,
     "testing": TestingConfig,
@@ -206,11 +130,7 @@ config_map = {
 }
 
 
-def get_config(env: str | None = None) -> type:
-    """
-    Return the config class for the given environment string.
-    Falls back to DevelopmentConfig if FLASK_ENV is not set.
-    """
+def get_config(env=None):
     env = env or os.environ.get("FLASK_ENV", "development")
     cfg = config_map.get(env)
     if cfg is None:

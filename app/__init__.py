@@ -29,6 +29,7 @@ import os
 from typing import Optional
 
 from flask import Flask, jsonify
+from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_bcrypt import Bcrypt
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
@@ -242,13 +243,10 @@ def create_app(config_name: Optional[str] = None) -> Flask:
     # 5. Register Blueprints
     # -------------------------------------------------------------------------
 
-    from app.routes.auth import auth_bp, init_limiter as auth_init_limiter
+    from app.routes.auth import auth_bp
     from app.routes.admin import admin_bp
     from app.routes.teacher import teacher_bp
     from app.routes.student import student_bp
-
-    # Inject the shared limiter into auth routes (for login rate limiting)
-    auth_init_limiter(limiter)
 
     app.register_blueprint(auth_bp)     # /api/auth/*
     app.register_blueprint(admin_bp)    # /api/admin/*
@@ -286,6 +284,40 @@ def create_app(config_name: Optional[str] = None) -> Flask:
             "error": "InternalServerError",
             "message": "An unexpected error occurred. Please try again later.",
         }), 500
+
+    # -------------------------------------------------------------------------
+    # 6b. Rate-limit login endpoint (CF-02 Fix)
+    # -------------------------------------------------------------------------
+    # [OWASP A07:2025 – Authentication Failures]: Apply 10/min per-IP rate limit
+    # to the login view function directly. This is the correct pattern for
+    # Blueprint-registered views — applying limiter.limit() inside the view
+    # function body (e.g. to a lambda) does not work.
+    # CF-02 FIXED: Removed the broken `limiter.limit()(lambda: None)()` pattern.
+    from flask_limiter.util import get_remote_address as _gra
+    limiter.limit(
+        "10 per minute",
+        key_func=_gra,
+        error_message="Too many login attempts. Please wait before trying again.",
+    )(app.view_functions["auth.login"])
+
+    # -------------------------------------------------------------------------
+    # 6c. ProxyFix for trusted X-Forwarded-For (W-02 Fix)
+    # -------------------------------------------------------------------------
+    # [OWASP A02:2025 – Security Misconfiguration]: Only trust X-Forwarded-For
+    # headers from the configured number of upstream proxies. Without this,
+    # any client can spoof their IP in audit logs.
+    trusted_proxies = int(os.environ.get("TRUSTED_PROXY_COUNT", 0))
+    if trusted_proxies > 0:
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=trusted_proxies)
+
+    # -------------------------------------------------------------------------
+    # 6d. Production startup assertion (CF-01 safeguard)
+    # -------------------------------------------------------------------------
+    if os.environ.get("FLASK_ENV") == "production":
+        assert app.config.get("RATELIMIT_STORAGE_URI"), (
+            "[Security] RATELIMIT_STORAGE_URI must be set in production. "
+            "In-memory rate limiting is invalid across gunicorn workers."
+        )
 
     # -------------------------------------------------------------------------
     # 7. Health Check

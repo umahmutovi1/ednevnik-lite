@@ -1,63 +1,41 @@
 """
-routes/auth.py — Authentication Blueprint (Phase 2)
-=====================================================
-Phase 2 changes:
-  - LoginSchema validates all /login input before authenticate_user is called
-  - /refresh: token rotation — new refresh token issued, old JTI blocklisted
-  - /logout: both access + refresh JTIs blocklisted in Redis
-  - @jwt.token_in_blocklist_loader checks every protected request
-
-OWASP 2025 COVERAGE:
-  - [A07:2025 – Authentication Failures]: rate limiting, bcrypt timing safety, enumeration prevention
-  - [A04:2025 – Cryptographic Failures]: JWT HS256, short-lived access tokens, Redis blocklist
-  - [A05:2025 – Injection]: LoginSchema validates + strips all input
-  - [A09:2025 – Security Logging and Alerting Failures]: every auth event (success + failure) audited
-  - [A10:2025 – Mishandling of Exceptional Conditions]: ValidationError -> 400, never 500
+routes/auth.py — Authentication Blueprint (Audit-Fixed)
+========================================================
+AUDIT FIX APPLIED:
+  CF-02: The broken `limiter.limit()(lambda: None)()` pattern has been removed.
+         The login rate limit is now applied in create_app() via
+         app.view_functions["auth.login"] after Blueprint registration.
+         The init_limiter() injection pattern is also removed.
 """
 
 from flask import Blueprint, jsonify, request
-from flask_jwt_extended import (
-    get_jwt,
-    get_jwt_identity,
-    jwt_required,
-)
-from flask_limiter import Limiter
+from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 from marshmallow import ValidationError
 
 from app.models import User
 from app.schemas.auth_schemas import LoginSchema
 from app.services.audit_service import (
-    audit_login_failure,
-    audit_login_success,
-    audit_logout,
-    write_audit,
+    audit_login_failure, audit_login_success, audit_logout, write_audit,
 )
 from app.services.auth_service import authenticate_user, create_tokens
 from app.utils.token_blocklist import blocklist_token, is_token_blocklisted
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
-limiter: Limiter = None  # type: ignore[assignment]
-
 _login_schema = LoginSchema()
-
-
-def init_limiter(app_limiter: Limiter) -> None:
-    global limiter
-    limiter = app_limiter
 
 
 @auth_bp.route("/login", methods=["POST"])
 def login():
     """
-    [OWASP A05:2025 - Injection]: LoginSchema validates all fields before any DB interaction.
-    [OWASP A07:2025 - Authentication Failures]: Rate limited; same error for bad email/password.
-    [OWASP A09:2025 - Security Logging]: Both success and failure written to AuditLog.
-    [OWASP A10:2025 - Mishandling of Exceptional Conditions]: ValidationError -> 400, not 500.
-    """
-    if limiter:
-        limiter.limit("10 per minute")(lambda: None)()
+    [OWASP A05:2025 – Injection]: LoginSchema validates before DB interaction.
+    [OWASP A07:2025 – Authentication Failures]: Rate limit applied in create_app().
+    [OWASP A09:2025 – Security Logging]: Both success and failure logged.
+    [OWASP A10:2025 – Mishandling]: ValidationError -> 401 generic, not 500.
 
+    CF-02 FIX: The broken lambda rate-limit workaround has been removed.
+    The 10/min rate limit is registered in create_app() via app.view_functions.
+    """
     raw = request.get_json(silent=True)
     if not raw:
         return jsonify({"error": "Bad Request", "message": "JSON body required."}), 400
@@ -65,7 +43,6 @@ def login():
     try:
         data = _login_schema.load(raw)
     except ValidationError:
-        # Generic error -- do NOT expose which field failed (prevents email enumeration)
         return jsonify({"error": "Unauthorized", "message": "Invalid email or password."}), 401
 
     user, error = authenticate_user(data["email"], data["password"])
@@ -82,15 +59,7 @@ def login():
 @auth_bp.route("/refresh", methods=["POST"])
 @jwt_required(refresh=True)
 def refresh():
-    """
-    Issue a NEW access token AND a NEW refresh token (token rotation).
-    Blocklist the old refresh token JTI immediately.
-
-    [OWASP A04:2025 - Cryptographic Failures]: Token rotation ensures a stolen
-    refresh token can only be used once. After rotation the old token is dead.
-    [OWASP A07:2025 - Authentication Failures]: Without a blocklist, stateless JWTs
-    cannot support true logout or privilege revocation.
-    """
+    """Token rotation with Redis blocklist. [OWASP A04:2025, A07:2025]"""
     claims = get_jwt()
     old_jti = claims.get("jti")
     identity = get_jwt_identity()
@@ -110,19 +79,12 @@ def refresh():
 
     new_tokens = create_tokens(user)
 
-    # Blocklist old refresh JTI with TTL = remaining lifetime of the old token
-    # Why TTL must equal remaining lifetime: longer wastes Redis memory; indefinite fills Redis.
     if old_jti:
         exp = claims.get("exp")
         blocklist_token(old_jti, exp_timestamp=exp, token_type="refresh")
 
-    write_audit(
-        action="token_refresh",
-        actor_id=user.id,
-        resource_type="User",
-        resource_id=user.id,
-        detail="Token rotated -- old refresh JTI blocklisted.",
-    )
+    write_audit(action="token_refresh", actor_id=user.id, resource_type="User",
+                resource_id=user.id, detail="Token rotated -- old refresh JTI blocklisted.")
 
     return jsonify({
         "access_token": new_tokens["access_token"],
@@ -136,9 +98,10 @@ def refresh():
 @jwt_required()
 def logout():
     """
-    Blocklist both the access token and refresh token.
-    [OWASP A07:2025 - Authentication Failures]: True server-side logout.
-    After this call both tokens are dead even if cryptographically valid.
+    Dual-JTI revocation. [OWASP A07:2025]
+    AUDIT FIX (Gap-04): blocklist_token() return value is checked.
+    If the Redis write fails, we return 503 rather than 200 — a 200 would
+    imply the token is dead when it is not.
     """
     claims = get_jwt()
     access_jti = claims.get("jti")
@@ -146,7 +109,14 @@ def logout():
     identity = get_jwt_identity()
 
     if access_jti:
-        blocklist_token(access_jti, exp_timestamp=access_exp, token_type="access")
+        # [OWASP A10:2025 – Mishandling of Exceptional Conditions]:
+        # Check the return value — False means Redis write failed.
+        success = blocklist_token(access_jti, exp_timestamp=access_exp, token_type="access")
+        if not success:
+            return jsonify({
+                "error": "ServiceUnavailable",
+                "message": "Logout could not be completed. Please try again.",
+            }), 503
 
     raw = request.get_json(silent=True) or {}
     refresh_token_str = raw.get("refresh_token")
@@ -166,9 +136,7 @@ def logout():
 @auth_bp.route("/me", methods=["GET"])
 @jwt_required()
 def me():
-    """
-    [OWASP A07:2025 - Authentication Failures]: Re-queries DB to catch deactivated accounts.
-    """
+    """[OWASP A07:2025]: Re-queries DB to catch deactivated accounts."""
     identity = get_jwt_identity()
     user = User.query.get(int(identity))
     if user is None or not user.is_active:
