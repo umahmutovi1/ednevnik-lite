@@ -21,7 +21,7 @@ Flask==3.0.3
 # --- ORM & Database ---
 Flask-SQLAlchemy==3.1.1     # ORM — SQL Injection structurally impossible [OWASP A05:2025]
 Flask-Migrate==4.0.7        # Alembic schema version control
-psycopg2-binary==2.9.9
+psycopg[binary]>=3.2
 # [SUPPLY CHAIN RISK]: binary wheel bypasses source verification. Use psycopg2 (non-binary) in prod.
 
 # --- Authentication & Token Security ---

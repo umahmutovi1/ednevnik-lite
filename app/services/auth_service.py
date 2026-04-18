@@ -82,10 +82,9 @@ def authenticate_user(email: str, password: str) -> Tuple[Optional[User], str]:
     user = User.query.filter_by(email=normalized_email).first()
 
     if user is None:
-        # Dummy hash check to equalize response time regardless of whether
-        # the email exists — prevents timing-based username enumeration.
+    # Dummy hash — valid bcrypt salt format za timing protection
         bcrypt.check_password_hash(
-            "$2b$12$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "$2b$12$LKJHlkjhLKJHlkjhLKJHluABC123defGHI456jklMNO789pqrSTU",
             password
         )
         return None, _GENERIC_ERROR
