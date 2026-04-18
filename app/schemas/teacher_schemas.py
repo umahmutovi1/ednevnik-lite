@@ -1,15 +1,15 @@
 """
-app/schemas/teacher_schemas.py — Teacher Marshmallow Schemas
-=============================================================
-Validates all input to /api/teacher/* endpoints.
+app/schemas/teacher_schemas.py — Teacher Marshmallow Schemas (SonarQube Fixed)
+===============================================================================
+SONARQUBE KOREKCIJE:
+  1. DUPLICATE CODE: validate_subject pojavljivao se identično u
+     CreateGradeSchema, UpdateGradeSchema i CreateAttendanceSchema.
+     Ekstraktovano u _validate_subject_field() helper.
+     → Sigurnosna relevantnost: isto kao i za name validator — sprječava
+       nekonzistentnu XSS zaštitu ako se jedan validator ispravi bez drugog.
 
-OWASP 2025 MAPPINGS (summary):
-  - student_id   : A01 (Broken Access Control) — integer type safety prevents IDOR via crafted ID
-  - subject      : A05 (Injection) — length + regex prevents stored XSS and SQLi surface
-  - value        : A05 (Injection), A06 (Insecure Design) — range enforcement at schema level
-  - note         : A05 (Injection) — length cap prevents oversized payload DoS
-  - date         : A10 (Mishandling Exceptional Conditions) — strict ISO 8601 parsing
-  - status       : A05 (Injection) — enum allowlist, no free-text reaches DB
+  2. MAGIC STRINGS: "Invalid characters in subject." zamijenjeno
+     referencom na messages.MSG_INVALID_SUBJECT_CHARS konstante.
 """
 
 import re
@@ -17,51 +17,78 @@ from datetime import datetime, timezone
 
 from marshmallow import Schema, ValidationError, fields, validate, validates, RAISE
 
+from app.utils.messages import (
+    MSG_INVALID_SUBJECT_CHARS,
+    MSG_GRADE_NOT_FOUND,
+)
 
 # ---------------------------------------------------------------------------
-# Shared validators
+# Validators
 # ---------------------------------------------------------------------------
 
-# [OWASP A05:2025 – Injection]: Subject allowlist — letters (including Bosnian/Croatian
-# unicode), digits, spaces, hyphens, dots, colons. Rejects HTML/JS special chars.
+# [OWASP A05:2025 – Injection]: Subject allowlist — slova (uključujući bosanski
+# unicode), cifre, razmaci, crtice, tačke, dvotačke.
+# Odbija HTML/JS specijalne karaktere.
 _SUBJECT_PATTERN = re.compile(
     r"^[\w\s\-\.\:\u00C0-\u024F]+$",
     re.UNICODE
 )
 
-# Valid attendance status values — same set as the DB Enum
-# [OWASP A05:2025 – Injection]: Enum allowlist prevents free-text reaching the DB column
 _VALID_STATUSES = {"prisutan", "odsutan", "kasnjenje"}
 
 
+# ---------------------------------------------------------------------------
+# SONARQUBE FIX: Deduplicirani subject validator
+# ---------------------------------------------------------------------------
+
+def _validate_subject_field(value: str) -> str:
+    """
+    Zajednički validator za subject polja u svim teacher schemama.
+
+    MAINTAINABILITY FIX (SonarQube Duplicate Code):
+    validate_subject se pojavljuje identično u CreateGradeSchema,
+    UpdateGradeSchema i CreateAttendanceSchema. Ekstraktovano ovdje.
+
+    SIGURNOSNA RELEVANTNOST:
+    Subject polje se prikazuje u student view-u i admin dashboardu.
+    Nedosljedna XSS validacija (npr. ispravi se u jednoj shemi, ne u drugoj)
+    mogla bi dozvoliti stored XSS napad kroz subject polje.
+    [OWASP A05:2025 – Injection]
+    """
+    stripped = value.strip()
+    if not _SUBJECT_PATTERN.match(stripped):
+        raise ValidationError(MSG_INVALID_SUBJECT_CHARS)  # SONARQUBE FIX: magic string
+    return stripped
+
+
+# ---------------------------------------------------------------------------
+# Schemas
+# ---------------------------------------------------------------------------
+
 class CreateGradeSchema(Schema):
     """
-    Validates POST /api/teacher/grades request body.
+    Validira POST /api/teacher/grades request body.
 
-    Note: teacher_id is NOT in this schema — it is always taken from the JWT auth
-    context in the route handler, never from the request body. Including it here
-    would create a surface for teachers to spoof another teacher's ID.
+    NAPOMENA: teacher_id NIJE u ovoj shemi — uvijek se uzima iz JWT auth
+    konteksta u route handleru, nikad iz request body-ja.
     [OWASP A01:2025 – Broken Access Control]
     """
 
     class Meta:
-        # [OWASP A05:2025 – Injection]: RAISE on unknown fields
         unknown = RAISE
 
     student_id = fields.Integer(
         required=True,
         load_only=True,
-        strict=True,  # Rejects "1.0", "1abc", strings — must be a JSON integer
-        # [OWASP A01:2025 – Broken Access Control]: strict integer type prevents
-        # IDOR via non-integer student_id values ("1 UNION SELECT...", "1.0", etc.)
+        strict=True,
+        # [OWASP A01:2025 – Broken Access Control]: strict integer sprječava
+        # IDOR putem non-integer student_id vrijednosti ("1 UNION SELECT...")
         error_messages={"required": "student_id is required.", "invalid": "Invalid student."},
     )
 
     subject = fields.Str(
         required=True,
         load_only=True,
-        # [OWASP A05:2025 – Injection]: 2-100 chars; allowlist blocks XSS and SQLi surface
-        # Max 100 matches the DB column length — prevents truncation surprises
         validate=validate.Length(min=2, max=100),
         error_messages={"required": "Subject is required."},
     )
@@ -70,22 +97,20 @@ class CreateGradeSchema(Schema):
         required=True,
         load_only=True,
         strict=True,
-        # [OWASP A06:2025 – Insecure Design]: Range enforcement at schema level is
-        # defense-in-depth. The ORM @validates decorator also checks this, but we
-        # catch invalid values here before they touch any business logic at all.
+        # [OWASP A06:2025 – Insecure Design]: Range enforcement na schema nivou
+        # je defense-in-depth — ORM @validates to također provjerava.
         validate=validate.Range(min=1, max=5),
         error_messages={
             "required": "Grade value is required.",
             "invalid": "Invalid grade value.",
-            "validator_failed": "Grade must be between 1 and 5.",
+            "validator_failed": MSG_GRADE_NOT_FOUND,
         },
     )
 
     note = fields.Str(
         load_only=True,
         allow_none=True,
-        # [OWASP A05:2025 – Injection]: 1000 char cap prevents oversized payload DoS
-        # and limits the attack surface for stored XSS in note fields
+        # [OWASP A05:2025 – Injection]: 1000 char cap sprječava oversized payload DoS
         validate=validate.Length(max=1000),
         load_default=None,
     )
@@ -93,18 +118,13 @@ class CreateGradeSchema(Schema):
     @validates("subject")
     def validate_subject(self, value: str) -> str:
         """
-        [OWASP A05:2025 – Injection]: Subject allowlist validation.
-        Blocks HTML/JS injection payloads stored in subject fields that could be
-        rendered in admin dashboards or student views without additional sanitization.
+        SONARQUBE FIX: Poziva _validate_subject_field() umjesto duplicirane logike.
+        [OWASP A05:2025 – Injection]
         """
-        stripped = value.strip()
-        if not _SUBJECT_PATTERN.match(stripped):
-            raise ValidationError("Invalid characters in subject.")
-        return stripped
+        return _validate_subject_field(value)
 
     @validates("note")
     def validate_note(self, value) -> str | None:
-        """[OWASP A05:2025 – Injection]: Strip whitespace from notes; allow None."""
         if value is None:
             return None
         return value.strip() or None
@@ -112,22 +132,21 @@ class CreateGradeSchema(Schema):
 
 class UpdateGradeSchema(Schema):
     """
-    Validates PATCH /api/teacher/grades/<id> request body.
-
-    All fields optional — partial update. The same validation rules apply as
-    CreateGradeSchema for any field that IS present.
+    Validira PATCH /api/teacher/grades/<id> request body.
+    Sva polja opcionalna — partial update.
     """
 
     class Meta:
-        # [OWASP A05:2025 – Injection]: RAISE on unknown fields
         unknown = RAISE
 
     value = fields.Integer(
         load_only=True,
         strict=True,
-        # [OWASP A06:2025 – Insecure Design]: same range enforcement on update
         validate=validate.Range(min=1, max=5),
-        error_messages={"invalid": "Invalid grade value.", "validator_failed": "Grade must be between 1 and 5."},
+        error_messages={
+            "invalid": "Invalid grade value.",
+            "validator_failed": "Grade must be between 1 and 5.",
+        },
     )
 
     subject = fields.Str(
@@ -143,11 +162,8 @@ class UpdateGradeSchema(Schema):
 
     @validates("subject")
     def validate_subject(self, value: str) -> str:
-        # [OWASP A05:2025 – Injection]: same allowlist as CreateGradeSchema
-        stripped = value.strip()
-        if not _SUBJECT_PATTERN.match(stripped):
-            raise ValidationError("Invalid characters in subject.")
-        return stripped
+        """SONARQUBE FIX: Dijeli logiku sa CreateGradeSchema."""
+        return _validate_subject_field(value)
 
     @validates("note")
     def validate_note(self, value) -> str | None:
@@ -158,23 +174,17 @@ class UpdateGradeSchema(Schema):
 
 class CreateAttendanceSchema(Schema):
     """
-    Validates POST /api/teacher/attendance request body.
-
-    Date handling is strict — we parse ISO 8601 here and reject anything that
-    doesn't conform. This prevents the route handler from receiving a malformed
-    date string and crashing in an unexpected way.
-    [OWASP A10:2025 – Mishandling of Exceptional Conditions]
+    Validira POST /api/teacher/attendance request body.
+    [OWASP A10:2025 – Mishandling of Exceptional Conditions]: Strogi ISO 8601 parsing.
     """
 
     class Meta:
-        # [OWASP A05:2025 – Injection]: RAISE on unknown fields
         unknown = RAISE
 
     student_id = fields.Integer(
         required=True,
         load_only=True,
         strict=True,
-        # [OWASP A01:2025 – Broken Access Control]: integer type safety prevents IDOR
         error_messages={"required": "student_id is required.", "invalid": "Invalid student."},
     )
 
@@ -182,24 +192,20 @@ class CreateAttendanceSchema(Schema):
         required=True,
         load_only=True,
         validate=validate.Length(min=2, max=100),
-        # [OWASP A05:2025 – Injection]: length + allowlist (see @validates below)
         error_messages={"required": "Subject is required."},
     )
 
     date = fields.Str(
         required=True,
         load_only=True,
-        # [OWASP A10:2025 – Mishandling of Exceptional Conditions]: string first,
-        # then parsed in @validates to produce a clean datetime. Using fields.DateTime
-        # directly would silently accept formats we don't want (e.g., "2024/01/01").
         error_messages={"required": "Date is required."},
     )
 
     status = fields.Str(
         required=True,
         load_only=True,
-        # [OWASP A05:2025 – Injection]: OneOf enforces enum allowlist — only the three
-        # valid status values can reach the DB. Free-text never reaches the Enum column.
+        # [OWASP A05:2025 – Injection]: OneOf enum allowlist — samo tri validne
+        # vrijednosti mogu doći do DB kolone. Free-text nikad ne dotiče Enum kolonu.
         validate=validate.OneOf(
             _VALID_STATUSES,
             error="Status must be one of: prisutan, odsutan, kasnjenje.",
@@ -216,25 +222,23 @@ class CreateAttendanceSchema(Schema):
 
     @validates("subject")
     def validate_subject(self, value: str) -> str:
-        # [OWASP A05:2025 – Injection]: same allowlist as grade schemas
-        stripped = value.strip()
-        if not _SUBJECT_PATTERN.match(stripped):
-            raise ValidationError("Invalid characters in subject.")
-        return stripped
+        """SONARQUBE FIX: Dijeli logiku sa grade schemama."""
+        return _validate_subject_field(value)
 
     @validates("date")
     def validate_date(self, value: str) -> str:
         """
-        [OWASP A10:2025 – Mishandling of Exceptional Conditions]: Strict ISO 8601 parsing.
-        We validate the date string here so the route handler receives a string that is
-        guaranteed to be parseable. If parsing fails inside the route handler (outside a
-        try/except), the app would return a raw 500 with a stack trace — information
-        disclosure risk.
+        [OWASP A10:2025 – Mishandling of Exceptional Conditions]: Strogi ISO 8601 parsing.
+        Validiramo string ovdje da route handler primi garantirano parsirabilni string.
+        Nevalidiran datum bi uzrokovao nekontrolisani exception u route handleru —
+        information disclosure rizik.
         """
         try:
             datetime.fromisoformat(value)
         except ValueError:
-            raise ValidationError("Invalid date format. Use ISO 8601 (e.g. 2024-09-01T08:00:00).")
+            raise ValidationError(
+                "Invalid date format. Use ISO 8601 (e.g. 2024-09-01T08:00:00)."
+            )
         return value
 
     @validates("note")

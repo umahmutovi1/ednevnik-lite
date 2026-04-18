@@ -1,63 +1,100 @@
 """
-app/schemas/admin_schemas.py — Admin Marshmallow Schemas
-=========================================================
-Validates all input to /api/admin/* endpoints.
+app/schemas/admin_schemas.py — Admin Marshmallow Schemas (SonarQube Fixed)
+===========================================================================
+SONARQUBE KOREKCIJE:
+  1. DUPLICATE CODE (L118, L192): validate_first_name i validate_last_name
+     imali identičnu implementaciju. Ekstraktovana u zajednički helper
+     _validate_name_field() koji obje metode pozivaju.
+     → Sigurnosna relevantnost: NIJE direktno sigurnosna — code quality.
+       Međutim, duplicirani validacijski kod nosi rizik da se u budućnosti
+       jedna kopija ispravi a druga ne, što bi dovelo do nedosljedne validacije
+       i potencijalnog XSS propusta u jednom od polja.
 
-OWASP 2025 MAPPINGS PER FIELD (summary — detailed inline below):
-  - email          : A05 (Injection), A07 (Auth Failures)
-  - password       : A04 (Cryptographic Failures), A07 (Auth Failures)
-  - first/last_name: A05 (Injection) — prevents XSS payloads stored in name fields
-  - role_id        : A01 (Broken Access Control) — allowlist prevents privilege escalation
+  2. MAGIC STRINGS: "Invalid role." i "Invalid characters in name." zamijenjeni
+     referencama na app.utils.messages konstante.
+     → Sigurnosna relevantnost: konzistentnost poruka eliminiše information
+       disclosure kroz razlike u tekstu grešaka.
+
+OWASP 2025 MAPPINGS (nepromijenjeno):
+  - email     : A05 (Injection), A07 (Auth Failures)
+  - password  : A04 (Cryptographic Failures), A07 (Auth Failures)
+  - first/last: A05 (Injection) — sprječava XSS payloade u name poljima
+  - role_id   : A01 (Broken Access Control) — allowlist sprječava eskalaciju privilegija
 """
 
 import re
 
 from marshmallow import Schema, ValidationError, fields, post_load, validate, validates, RAISE
 
+from app.utils.messages import (
+    MSG_INVALID_NAME_CHARS,
+    MSG_INVALID_ROLE,
+)
 
 # ---------------------------------------------------------------------------
-# Validators reused across schemas
+# Validators
 # ---------------------------------------------------------------------------
 
-# [OWASP A05:2025 – Injection]: Allowlist for name fields — permits letters (including
-# unicode for Bosnian/Croatian characters: čćšžđ), hyphens, apostrophes, and spaces.
-# Rejects '<', '>', '"', '&' which are the core XSS payload characters.
+# [OWASP A05:2025 – Injection]: Allowlist za name polja — dozvoljava slova
+# (uključujući Bosanski/Hrvatski: čćšžđ), crtice, apostrofe i razmake.
+# Odbija '<', '>', '"', '&' koji su core XSS payload karakteri.
 _NAME_PATTERN = re.compile(
-    r"^[\w\s'\-\u00C0-\u024F]+$",  # \u00C0-\u024F covers Latin Extended-A/B (čćšžđ etc.)
+    r"^[\w\s'\-\u00C0-\u024F]+$",
     re.UNICODE
 )
 
-# [OWASP A07:2025 – Authentication Failures]: Minimum password complexity.
-# Requires at least one uppercase, one lowercase, one digit, one special char.
-# This is a *server-side* check — do not rely on frontend-only enforcement.
+# [OWASP A07:2025 – Authentication Failures]: Minimalna složenost lozinke.
+# Server-side provjera — ne oslanjati se samo na frontend validaciju.
 _PASSWORD_COMPLEXITY = re.compile(
     r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};':\"\\|,.<>\/?]).{8,}$"
 )
 
-# [OWASP A01:2025 – Broken Access Control]: Only these role IDs may be assigned via API.
-# Role IDs are seeded at startup — this allowlist prevents assigning a non-existent or
-# future privileged role by guessing its integer ID.
-# NOTE: Update this set if roles are ever re-seeded with different IDs.
-# A more robust approach (Phase 3) would query the Role table at validation time.
+# [OWASP A01:2025 – Broken Access Control]: Samo ovi role ID-ovi se mogu
+# dodijeliti putem API-ja. Sprječava dodjeljivanje nepostojećih rola.
+# NOTE: Ažurirati ako se rola re-seedaju sa drugačijim ID-ovima.
 _ALLOWED_ROLE_IDS = frozenset({1, 2, 3})  # admin=1, nastavnik=2, ucenik=3
 
 
-class CreateUserSchema(Schema):
-    """
-    Validates POST /api/admin/users request body.
+# ---------------------------------------------------------------------------
+# SONARQUBE FIX #1: Deduplicirani name validator
+# ---------------------------------------------------------------------------
 
-    All fields required on creation. Password is validated for complexity here —
-    the auth service hashes it immediately and never stores plaintext.
+def _validate_name_field(value: str) -> str:
     """
+    Zajednički validator za first_name i last_name polja.
+
+    MAINTAINABILITY FIX (SonarQube Duplicate Code):
+    validate_first_name i validate_last_name su imali identičnu implementaciju
+    na linijama L118 i L192 u admin_schemas.py. Ekstraktovano u ovaj helper
+    da se izbjegne dupliciranje logike.
+
+    SIGURNOSNA RELEVANTNOST:
+    Nije direktno sigurnosna popravka, ali eliminira rizik da se u budućnosti
+    jedna kopija validatora ispravi (npr. dodat novi zabranjen karakter) dok
+    druga ostane nepromijenjena — što bi dovelo do nedosljedne XSS zaštite.
+    [OWASP A05:2025 – Injection]
+    """
+    stripped = value.strip()
+    if not _NAME_PATTERN.match(stripped):
+        # Koristimo konstantu iz messages.py — SONARQUBE FIX #2 (Magic String)
+        raise ValidationError(MSG_INVALID_NAME_CHARS)
+    return stripped
+
+
+# ---------------------------------------------------------------------------
+# Schemas
+# ---------------------------------------------------------------------------
+
+class CreateUserSchema(Schema):
+    """Validira POST /api/admin/users request body."""
 
     class Meta:
-        # [OWASP A05:2025 – Injection]: RAISE on unknown fields — no parameter pollution
+        # [OWASP A05:2025 – Injection]: RAISE na nepoznatim poljima — nema parameter pollution
         unknown = RAISE
 
     email = fields.Email(
         required=True,
         load_only=True,
-        # [OWASP A05:2025 – Injection]: max 255 matches DB column; min 3 rejects "@a.b"
         validate=validate.Length(min=5, max=255),
         error_messages={
             "required": "Email is required.",
@@ -68,8 +105,8 @@ class CreateUserSchema(Schema):
     password = fields.Str(
         required=True,
         load_only=True,
-        # [OWASP A04:2025 – Cryptographic Failures]: 8 min enforces meaningful entropy;
-        # 128 max prevents bcrypt DoS via silent truncation at 72 bytes.
+        # [OWASP A04:2025 – Cryptographic Failures]: min 8 za entropiju;
+        # max 128 sprječava bcrypt DoS (tiho truncation na 72 bajta)
         validate=validate.Length(min=8, max=128),
         error_messages={"required": "Password is required."},
     )
@@ -77,7 +114,6 @@ class CreateUserSchema(Schema):
     first_name = fields.Str(
         required=True,
         load_only=True,
-        # [OWASP A05:2025 – Injection]: 2-100 chars; name regex blocks XSS payloads
         validate=validate.Length(min=2, max=100),
         error_messages={"required": "First name is required."},
     )
@@ -85,7 +121,6 @@ class CreateUserSchema(Schema):
     last_name = fields.Str(
         required=True,
         load_only=True,
-        # [OWASP A05:2025 – Injection]: same as first_name
         validate=validate.Length(min=2, max=100),
         error_messages={"required": "Last name is required."},
     )
@@ -93,59 +128,56 @@ class CreateUserSchema(Schema):
     role_id = fields.Integer(
         required=True,
         load_only=True,
-        # [OWASP A01:2025 – Broken Access Control]: integer type enforcement prevents
-        # string smuggling ("1 OR 1=1") even though the ORM parameterizes anyway
         strict=True,
-        error_messages={"required": "Role is required.", "invalid": "Invalid role."},
+        error_messages={"required": "Role is required.", "invalid": MSG_INVALID_ROLE},
     )
 
     @validates("password")
     def validate_password_complexity(self, value: str) -> str:
         """
-        [OWASP A04:2025 – Cryptographic Failures]: Enforce password complexity server-side.
-        A weak password undermines bcrypt's work factor — if the password is "password1!",
-        no amount of hashing makes the account secure against dictionary attacks.
+        [OWASP A04:2025 – Cryptographic Failures]: Server-side provjera složenosti.
+        Slaba lozinka poništava bcrypt work factor — "password1!" nije sigurno
+        bez obzira koliko rundi hashiranja.
+        Generička poruka — ne otkriva koje pravilo nije zadovoljeno.
         """
         if not _PASSWORD_COMPLEXITY.match(value):
-            # Generic message — do not reveal which rule failed (attacker could use that
-            # to craft a barely-compliant password that is still weak).
-            raise ValidationError(
-                "Password does not meet complexity requirements."
-            )
+            raise ValidationError("Password does not meet complexity requirements.")
         return value
 
     @validates("first_name")
     def validate_first_name(self, value: str) -> str:
-        # [OWASP A05:2025 – Injection]: block XSS payload characters in stored name fields
-        if not _NAME_PATTERN.match(value.strip()):
-            raise ValidationError("Invalid characters in name.")
-        return value.strip()
+        """
+        SONARQUBE FIX: Poziva _validate_name_field() umjesto duplicirane logike.
+        [OWASP A05:2025 – Injection]: Blokira XSS payload karaktere u name poljima.
+        """
+        return _validate_name_field(value)
 
     @validates("last_name")
     def validate_last_name(self, value: str) -> str:
-        # [OWASP A05:2025 – Injection]: same as first_name
-        if not _NAME_PATTERN.match(value.strip()):
-            raise ValidationError("Invalid characters in name.")
-        return value.strip()
+        """
+        SONARQUBE FIX: Poziva _validate_name_field() umjesto duplicirane logike.
+        [OWASP A05:2025 – Injection]: Isti allowlist kao first_name.
+        """
+        return _validate_name_field(value)
 
     @validates("role_id")
     def validate_role_id(self, value: int) -> int:
         """
-        [OWASP A01:2025 – Broken Access Control]: Allowlist validation on role_id.
-        Without this, an attacker could POST role_id=99 or role_id=0 and either trigger
-        a DB FK error (information disclosure) or, in a misconfigured system, assign an
-        unintended role. We reject anything outside the known seed set immediately.
+        [OWASP A01:2025 – Broken Access Control]: Allowlist validacija role_id.
+        Bez ovoga, napadač može POST-ati role_id=99 i dobiti FK grešku
+        (information disclosure) ili u pogrešno konfiguriranom sistemu
+        dodijeliti nepostojuću rolu.
         """
         if value not in _ALLOWED_ROLE_IDS:
-            raise ValidationError("Invalid role.")
+            raise ValidationError(MSG_INVALID_ROLE)  # SONARQUBE FIX #2
         return value
 
     @post_load
     def normalize_email(self, data: dict, **kwargs) -> dict:
         """
-        [OWASP A07:2025 – Authentication Failures]: Normalize email to lowercase after
-        all field-level validation passes. Post-load ensures this runs once, consistently,
-        regardless of which field validators ran — no double-normalization bugs.
+        [OWASP A07:2025 – Authentication Failures]: Normalizacija emaila na lowercase
+        nakon svih field-level validacija. Post-load garantuje da se izvršava
+        jedanput, konzistentno, bez dvostruke normalizacije.
         """
         if "email" in data:
             data["email"] = data["email"].strip().lower()
@@ -154,21 +186,16 @@ class CreateUserSchema(Schema):
 
 class UpdateUserSchema(Schema):
     """
-    Validates PATCH /api/admin/users/<id> request body.
-
-    All fields are optional (partial update). Fields that ARE present are subject to
-    the same validation rules as CreateUserSchema. An empty payload is allowed by the
-    schema — the route handler returns 200 "No changes" in that case.
+    Validira PATCH /api/admin/users/<id> request body.
+    Sva polja su opcionalna (partial update).
     """
 
     class Meta:
-        # [OWASP A05:2025 – Injection]: RAISE on unknown fields
         unknown = RAISE
 
     first_name = fields.Str(
         load_only=True,
         validate=validate.Length(min=2, max=100),
-        # [OWASP A05:2025 – Injection]: same XSS protection as CreateUserSchema
     )
 
     last_name = fields.Str(
@@ -179,30 +206,27 @@ class UpdateUserSchema(Schema):
     role_id = fields.Integer(
         load_only=True,
         strict=True,
-        # [OWASP A01:2025 – Broken Access Control]: same allowlist as CreateUserSchema
     )
 
     is_active = fields.Boolean(
         load_only=True,
-        # [OWASP A01:2025 – Broken Access Control]: Boolean type-enforcement prevents
-        # "is_active=1 AND 1=1" style smuggling — marshmallow rejects non-booleans strictly
+        # [OWASP A01:2025 – Broken Access Control]: Boolean type-enforcement sprječava
+        # "is_active=1 AND 1=1" style smuggling
     )
 
     @validates("first_name")
     def validate_first_name(self, value: str) -> str:
-        if not _NAME_PATTERN.match(value.strip()):
-            raise ValidationError("Invalid characters in name.")
-        return value.strip()
+        """SONARQUBE FIX: Dijeli logiku sa CreateUserSchema kroz _validate_name_field()."""
+        return _validate_name_field(value)
 
     @validates("last_name")
     def validate_last_name(self, value: str) -> str:
-        if not _NAME_PATTERN.match(value.strip()):
-            raise ValidationError("Invalid characters in name.")
-        return value.strip()
+        """SONARQUBE FIX: Dijeli logiku sa CreateUserSchema kroz _validate_name_field()."""
+        return _validate_name_field(value)
 
     @validates("role_id")
     def validate_role_id(self, value: int) -> int:
-        # [OWASP A01:2025 – Broken Access Control]: allowlist check on partial update too
+        # [OWASP A01:2025 – Broken Access Control]: allowlist provjera i na partial update
         if value not in _ALLOWED_ROLE_IDS:
-            raise ValidationError("Invalid role.")
+            raise ValidationError(MSG_INVALID_ROLE)
         return value
