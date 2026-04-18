@@ -244,3 +244,28 @@
 - DB-level `REVOKE UPDATE, DELETE ON audit_logs` je manualni korak koji nije automatizovan
 - Nema alerting threshold-a za N uzastopnih neuspjelih login pokušaja
 
+## Sesija 4 — Datum: 18. april 2026.
+### Faza 3: Statička i dinamička analiza (PRIJE korekcija)
+
+#### SonarQube SAST rezultati:
+- Security issues: 0
+- Security Hotspots: 1 (CSRF — High priority, to review)
+- Maintainability issues: 17
+  - High severity: 12 (magic strings, cognitive complexity)
+  - Medium severity: 3 (duplicate code)
+  - Info: 2 (TODO komentari)
+- Reliability: 0
+- Security: 0
+
+#### OWASP ZAP DAST rezultati:
+- High rizik: 0
+- Medium rizik: 2 (CSP false positive, Format String false positive)
+- Low rizik: 2 (Server version leak, debug error disclosure)
+- Informational: 5
+- Postotak odbijenih zahtjeva: 93% (4xx odgovori)
+
+#### Ključni zaključak:
+Nijedan stvarni sigurnosni propust nije detektovan.
+Svi alerti su false positivi ili development-specifični.
+
+Sljedeci korak: AI korekcije na osnovu nalaza
