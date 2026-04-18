@@ -269,3 +269,5 @@ Nijedan stvarni sigurnosni propust nije detektovan.
 Svi alerti su false positivi ili development-specifični.
 
 Sljedeci korak: AI korekcije na osnovu nalaza
+
+Drugi ZAP scan pokazao je poboljšanje od 4 alerta manje (sa 9 na 5). Dva Medium alerta smanjena su na jedan, a ukupan broj Low alerta prepolovljen. Preostala 2 relevantna alerta (Format String Error i Server Version Leakage) su false positive odnosno development-specifičan nalaz koji se rješava nginx konfiguracijom u produkcijskom okruženju. Procenat uspješnih (2xx) odgovora povećan je sa 5% na 17%, što ukazuje na bolji coverage skeniranja sa 11 umjesto 10 endpointa.
