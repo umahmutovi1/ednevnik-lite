@@ -150,3 +150,122 @@
 | A10 - Exceptional Conditions | ✅ | Fail-closed Redis |
 
 - Sljedeći korak je testiranje aplikacije (SQLMap, OWASP ZAP, Burp Suite)
+
+## Sesija 3 — Datum: 17. april 2026.
+
+### Prompt #3: Finalni sigurnosni audit i priprema za eksterne alate
+
+**Šta sam tražila:** Sveobuhvatni sigurnosni audit prije pokretanja eksternih alata (SonarQube, OWASP ZAP, SQLMap, Burp Suite) sa identifikacijom i popravkom kritičnih nalaza
+
+**Šta je Claude generisao:**
+- SECURITY_AUDIT_REPORT.md (kompletan audit izvještaj)
+- Ispravljeni app/config.py (CF-01, CF-03, CF-04 fix)
+- Ispravljeni app/services/audit_service.py (CF-05 fix)
+- Ispravljeni app/routes/auth.py (CF-02 fix, Gap-04 fix)
+- Ispravljeni app/__init__.py (rate limit fix, ProxyFix, produkcijska asercija)
+- sonar-project.properties (novi fajl — W-06 fix)
+---
+
+### Statička analiza koda
+
+**Kritični nalazi — moraju biti popravljeni prije alata:**
+
+| ID | Fajl | Problem | Fix |
+|----|------|---------|-----|
+| CF-01 | app/config.py | `if False` mrtav kod — `RATELIMIT_STORAGE_URI` uvijek `None` u produkciji, Redis rate limiting tiho onemogućen | Uklonjena mrtva grana; vrijednost se postavlja isključivo u `init_secrets()` + produkcijska asercija |
+| CF-02 | app/routes/auth.py | `limiter.limit()(lambda: None)()` — dekorira throwaway lambdu, ne view funkciju; login brute-force limit nefunkcionalan | Uklonjeno; limit se registruje u `create_app()` via `app.view_functions["auth.login"]` |
+| CF-03 | app/config.py | Hardkodirani stringovi `"test-secret-key-not-for-production"` — SonarQube pravilo S6290 flaguje kao BLOCKER | Zamijenjeno sa `os.urandom(32).hex()` — nema string literala |
+| CF-04 | app/config.py | `JWT_ALGORITHM` i `JWT_DECODE_ALGORITHMS` nisu eksplicitno postavljeni — `alg:none` nije strukturalno odbijen | Dodano `JWT_ALGORITHM = "HS256"` i `JWT_DECODE_ALGORITHMS = ["HS256"]` u BaseConfig |
+| CF-05 | app/services/audit_service.py | Pokušani email se loguje kao plaintext PII u `detail` polju — GDPR problem | Email zamijenjen HMAC-SHA256 fingerprint-om (16 hex znakova, keyed sa SECRET_KEY) |
+
+**Upozorenja:**
+
+| ID | Problem | Fix |
+|----|---------|-----|
+| W-01 | `_ALLOWED_ROLE_IDS` hardkodiran frozenset — puca ako se role re-seedaju |
+| W-02 | `X-Forwarded-For` bez trusted proxy validacije — spoofable u audit logu | Dodan `ProxyFix` middleware sa `TRUSTED_PROXY_COUNT` env varijablom |
+| W-03 | Security-relevantni `TODO` komentari — SonarQube S1135 | Anotriani kao riješeni/praćeni |
+| W-04 | Predvidljive lozinke u test fixtures — SonarQube flag | Preporučen `secrets.token_urlsafe()` |
+| W-05 | Raw SQL provjera | Potvrđeno čisto — nema `text()`, `execute()` ni raw SQL nigdje |
+| W-06 | `sonar-project.properties` ne postoji | Kreiran sa ispravnim exclusionima i coverage pathom |
+
+---
+
+### Konfiguracija i infrastruktura
+
+| Oblast | Stavka | Status | Napomena |
+|--------|--------|--------|----------|
+| JWT | Access token TTL 15 min | ✅ | Enforced u BaseConfig |
+| JWT | Refresh token TTL 7 dana | ✅ | Enforced u BaseConfig |
+| JWT | `JWT_ALGORITHM` eksplicitno HS256 | ✅ | CF-04 fix primijenjen |
+| JWT | `JWT_DECODE_ALGORITHMS` allowlist | ✅ | CF-04 fix primijenjen |
+| JWT | Redis blocklist na svim rutama | ✅ | `token_in_blocklist_loader` registrovan |
+| JWT | Fail-closed pri Redis grešci | ✅ | `is_token_blocklisted` vraća True |
+| CORS | Specifični origins u produkciji | ✅ | Iz `CORS_ORIGINS` env var |
+| CORS | Wildcard + credentials kombinacija | ✅ | Nema — kontrolisano |
+| CSP | `unsafe-inline` odsutan | ✅ | `default-src 'none'` |
+| HSTS | max-age ≥ 31536000 | ✅ | 1 godina + preload |
+| HSTS | includeSubDomains + preload | ✅ | Postavljeno u Talisman |
+| Headers | X-Frame-Options DENY | ✅ | Talisman |
+| Headers | X-Content-Type-Options nosniff | ✅ | Talisman |
+| Headers | Referrer-Policy | ✅ | strict-origin-when-cross-origin |
+| Headers | Permissions-Policy | ✅ | camera, mic, geo disabled |
+| Produkcija | DEBUG=False hardkodiran | ✅ | Nije iz env var |
+| Produkcija | TESTING=False | ✅ | Hardkodirano |
+| Produkcija | sslmode=require | ✅ | Auto-dodaje se ako fali |
+| Produkcija | BCRYPT_LOG_ROUNDS ≥ 12 | ✅ | Default 12 |
+| Cookies | SECURE + HTTPONLY + SAMESITE | ✅ | BaseConfig |
+
+---
+
+### OWASP Top 10 (2025) Finalna tabela
+
+| # | Kategorija | Status | Implementacija | Preostali rizik |
+|---|-----------|--------|----------------|-----------------|
+| A01:2025 | Broken Access Control | ✅ | 4-slojna RBAC; ORM teacher_id/student_id scoping; role allowlist u shemi; admin self-demotion blokiran | `_ALLOWED_ROLE_IDS` hardkodiran (W-01) |
+| A02:2025 | Security Misconfiguration | ⚠️ | DEBUG=False; hardened CSP; HSTS preload; ProxyFix dodan | `sonar-project.properties` kreiran; produkcijska asercija za Redis dodana |
+| A03:2025 | Software Supply Chain Failures | ✅ | Pinned verzije; SUPPLY CHAIN RISK anotacije; pip-audit u CI | Nema `.dependabot/config.yml` |
+| A04:2025 | Cryptographic Failures | ✅ | bcrypt 12; JWT HS256 eksplicitno locked; HTTPS/HSTS; Redis blocklist TTL = remaining lifetime | — |
+| A05:2025 | Injection | ✅ | Nula raw SQL; marshmallow unknown=RAISE; type enforcement; regex allowlisti; @validates na modelu | Query-param inputi oslanjaju se samo na ORM parametrizaciju |
+| A06:2025 | Insecure Design | ✅ | Application Factory; schema-first gate; grade range na shemi I modelu; AuditLog append-only | `_ALLOWED_ROLE_IDS` design debt |
+| A07:2025 | Authentication Failures | ⚠️ | bcrypt timing-safe; dummy bcrypt za nepostojeće emaile; JWT 15min; refresh rotacija; fail-closed blocklist | Login rate limit bio nefunkcionalan (CF-02 fix primijenjen) |
+| A08:2025 | Software or Data Integrity Failures | ✅ | Nema eval/pickle/unsafe YAML; Flask-Migrate; AuditLog ORM eventi blokiraju UPDATE/DELETE | DB-level REVOKE je manualni korak |
+| A09:2025 | Security Logging and Alerting Failures | ⚠️ | AuditLog na svim akcijama; append-only; ip_address polje; admin viewer | Email bio plaintext PII (CF-05 fix primijenjen); nema alerting threshold-a |
+| A10:2025 | Mishandling of Exceptional Conditions | ✅ | ValidationError→400 generic; Redis fail→True (fail-closed); globalni errorhandler(500); logout vraća 503 ako blocklist write ne uspije | — |
+
+---
+
+**Šta sam morala ručno ispraviti:**
+- `app/services/auth_service.py`: uklonjen neispravan dummy bcrypt hash
+- requirements.txt prilagođen za moju arhitekturu
+
+**Identificirane slabosti koje ostaju:**
+- `_ALLOWED_ROLE_IDS` ostaje hardkodiran frozenset
+- DB-level `REVOKE UPDATE, DELETE ON audit_logs` je manualni korak koji nije automatizovan
+- Nema alerting threshold-a za N uzastopnih neuspjelih login pokušaja
+
+## Sesija 4 — Datum: 18. april 2026.
+### Faza 3: Statička i dinamička analiza (PRIJE korekcija)
+
+#### SonarQube SAST rezultati:
+- Security issues: 0
+- Security Hotspots: 1 (CSRF — High priority, to review)
+- Maintainability issues: 17
+  - High severity: 12 (magic strings, cognitive complexity)
+  - Medium severity: 3 (duplicate code)
+  - Info: 2 (TODO komentari)
+- Reliability: 0
+- Security: 0
+
+#### OWASP ZAP DAST rezultati:
+- High rizik: 0
+- Medium rizik: 2 (CSP false positive, Format String false positive)
+- Low rizik: 2 (Server version leak, debug error disclosure)
+- Informational: 5
+- Postotak odbijenih zahtjeva: 93% (4xx odgovori)
+
+#### Ključni zaključak:
+Nijedan stvarni sigurnosni propust nije detektovan.
+Svi alerti su false positivi ili development-specifični.
+
+Sljedeci korak: AI korekcije na osnovu nalaza
