@@ -60,6 +60,29 @@ limiter = Limiter(
 talisman = Talisman()
 cors = CORS()
 
+# ---------------------------------------------------------------------------
+# CSRF ZAŠTITA — SonarQube Security Hotspot Objašnjenje
+# ---------------------------------------------------------------------------
+# SonarQube može flagovati odsustvo CSRF tokena kao Security Hotspot.
+# CSRF zaštita NIJE potrebna za ovaj REST API iz sljedećeg razloga:
+#
+# CSRF napadi se oslanjaju na to da browser automatski šalje session cookies
+# sa svakim cross-origin request-om. Ovaj API koristi JWT tokene koji se
+# prenose isključivo u Authorization headeru ("Authorization: Bearer <token>").
+#
+# Browser NE šalje Authorization header automatski — samo cookies.
+# Napadač ne može iskoristiti korisnikov JWT token putem CSRF vektora jer:
+#   1. JavaScript na malicioznom sajtu ne može čitati Authorization header
+#      sa drugog origin-a (SOP/CORS to sprječava)
+#   2. Formi nije moguće automatski dodati custom Authorization header
+#
+# Referenca: OWASP CSRF Prevention Cheat Sheet —
+# "Stateless REST APIs using token-based auth (JWT in headers) are not
+# vulnerable to CSRF as long as tokens are not transmitted in cookies."
+#
+# [OWASP A07:2025 – Authentication Failures]: JWT u headeru, ne u cookie.
+# [OWASP A01:2025 – Broken Access Control]: Stateless token autentikacija.
+# noqa: S — intentionally no CSRF middleware (by design, not oversight)
 
 # ---------------------------------------------------------------------------
 # Factory Function
